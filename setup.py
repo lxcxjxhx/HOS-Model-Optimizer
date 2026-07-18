@@ -59,6 +59,7 @@ setup(
         "transformers>=4.35.0",
         "datasets>=2.14.0",
         "peft>=0.5.0",
+        "huggingface_hub>=0.19.0",
     ],
     extras_require={
         "quantization": [
@@ -102,6 +103,8 @@ setup(
             "hos-deploy=hos_optimizer.cli:deploy_cmd",
             "hos-config=hos_optimizer.cli:config_cmd",
             "hos-optimizer=hos_optimizer.cli:main",
+            "hos-upload=hos_optimizer.cli:upload_cmd",
+            "hos-run=hos_optimizer.cli:run_cmd",
         ],
     },
     keywords="llm optimization quantization inference training deployment",

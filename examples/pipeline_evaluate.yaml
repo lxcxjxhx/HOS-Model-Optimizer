@@ -1,0 +1,19 @@
+# Pipeline: 评测
+# 用法: hos-optimizer run --config pipeline_evaluate.yaml
+
+evaluate:
+  model: /path/to/model
+  dataset: /path/to/test.json
+  metrics:
+    - bleu
+    - rouge
+    - exact_match
+    - f1
+  task: text_generation
+  output: ./eval_results.json
+  format: alpaca
+  max_samples: 100
+  max_seq_length: 512
+  max_new_tokens: 256
+  batch_size: 1
+  load_in_4bit: false

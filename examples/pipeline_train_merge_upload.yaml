@@ -1,0 +1,28 @@
+# Pipeline: 训练 -> 合并 -> 上传
+# 用法: hos-optimizer run --config pipeline_train_merge_upload.yaml
+
+train:
+  model: /path/to/base-model
+  dataset: /path/to/dataset.jsonl
+  output: ./output/lora_adapter
+  method: qlora
+  format: alpaca
+  max_seq_length: 2048
+  lora_rank: 16
+  lora_alpha: 32
+  epochs: 3
+  batch_size: 2
+  grad_accum: 8
+  lr: 2.0e-4
+
+merge:
+  base_model: /path/to/base-model
+  adapter: ""          # 留空时自动使用 train 输出
+  output: ./output/merged_model
+  after_train: true    # 训练完成后自动执行合并
+
+upload:
+  model: ""            # 留空时自动使用 merge 输出
+  repo_id: user/my-model
+  private: false
+  after_merge: true    # 合并完成后自动执行上传

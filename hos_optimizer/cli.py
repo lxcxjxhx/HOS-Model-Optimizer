@@ -479,6 +479,89 @@ def evaluate_cmd(model, dataset, metrics, task, output, dataset_format, max_samp
         sys.exit(1)
 
 
+# ============================================================
+# hos-upload: 上传模型到 HuggingFace Hub
+# ============================================================
+
+@cli.command("upload")
+@click.option("--model", type=str, required=True, help="模型目录路径")
+@click.option("--repo-id", type=str, required=True, help="HuggingFace 仓库 ID（如 user/repo）")
+@click.option("--private", is_flag=True, default=False, help="创建私有仓库")
+def upload_cmd(model, repo_id, private):
+    """上传模型到 HuggingFace Hub
+
+    将本地模型目录逐文件上传到 HuggingFace Hub 仓库。
+
+    示例：
+      # 上传模型到公开仓库
+      hos-optimizer upload --model ./merged --repo-id user/my-model
+
+      # 上传到私有仓库
+      hos-optimizer upload --model ./merged --repo-id user/my-model --private
+    """
+    # 在导入 upload 模块前设置环境变量，抑制警告以确保进度条正常显示
+    import os
+    import warnings
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
+    os.environ["PYTHONWARNINGS"] = "ignore"
+    warnings.filterwarnings("ignore", category=UserWarning)
+
+    from hos_optimizer.upload import upload_to_huggingface
+
+    try:
+        upload_to_huggingface(
+            model_path=model,
+            repo_id=repo_id,
+            private=private,
+        )
+    except RuntimeError as e:
+        click.echo(f"认证错误: {e}", err=True)
+        sys.exit(1)
+    except FileNotFoundError as e:
+        click.echo(f"路径错误: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"上传错误: {e}", err=True)
+        sys.exit(1)
+
+
+# ============================================================
+# hos-run: 统一工作流执行
+# ============================================================
+
+@cli.command("run")
+@click.option("--config", type=str, required=True, help="Pipeline 配置文件路径 (YAML)")
+@click.option("--dry-run", is_flag=True, default=False, help="仅显示执行计划，不实际执行")
+def run_cmd(config, dry_run):
+    """执行统一工作流
+
+    通过 YAML 配置文件定义完整的工作流程，支持训练、合并、上传、评测、部署等多步骤编排。
+
+    示例：
+      # 查看执行计划
+      hos-optimizer run --config pipeline.yaml --dry-run
+
+      # 执行完整流程
+      hos-optimizer run --config pipeline.yaml
+    """
+    from hos_optimizer.pipeline import PipelineConfig, PipelineExecutor
+
+    try:
+        pipeline_config = PipelineConfig.from_yaml(config)
+        executor = PipelineExecutor(pipeline_config)
+        result = executor.execute(dry_run=dry_run)
+
+        if result.get("status") == "failed":
+            click.echo(f"\n流程执行失败: {result.get('error')}", err=True)
+            sys.exit(1)
+    except FileNotFoundError:
+        click.echo(f"配置文件不存在: {config}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"执行错误: {e}", err=True)
+        sys.exit(1)
+
+
 def main():
     """主入口函数"""
     cli()

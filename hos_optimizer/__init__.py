@@ -17,12 +17,14 @@ HOS Model Optimizer - 小模型优化工具包
 __version__ = "1.0.0"
 __author__ = "HOS Team"
 
-# 导出主要类
+# 导出主要类（延迟导入 train 模块以避免触发 unsloth 警告）
 from .config import ConfigManager
 from .inference import UnifiedInferenceEngine
 from .quantize import QuantizationError
-from .train import TrainingConfig
 from .deploy import HardwareDetector, ConfigSelector, ServiceLauncher
+
+# TrainingConfig 需要时从 train 模块直接导入
+# from .train import TrainingConfig
 
 __all__ = [
     "__version__",
@@ -30,7 +32,6 @@ __all__ = [
     "ConfigManager",
     "UnifiedInferenceEngine",
     "QuantizationError",
-    "TrainingConfig",
     "HardwareDetector",
     "ConfigSelector",
     "ServiceLauncher",
