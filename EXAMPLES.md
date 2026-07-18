@@ -8,6 +8,7 @@
 - [推理示例](#推理示例)
 - [训练示例](#训练示例)
 - [部署示例](#部署示例)
+- [评测示例](#评测示例)
 - [性能测试示例](#性能测试示例)
 - [8GB VRAM 场景优化示例](#8gb-vram-场景优化示例)
 
@@ -593,6 +594,219 @@ if launcher.start():
     checker = HealthChecker(host="localhost", port=8000)
     if checker.check_model_loaded(timeout=300):
         print("模型加载完成")
+```
+
+---
+
+## 评测示例
+
+### 单模型评测
+
+使用 `hos-evaluate` 命令对模型进行质量评测。
+
+```bash
+# 基础评测（默认使用 BLEU 和 ROUGE 指标）
+hos-evaluate --model ./model --dataset ./test.json
+
+# 指定评测指标
+hos-evaluate --model ./model --dataset ./test.json \
+    --metrics bleu rouge f1 exact_match
+
+# 指定输出格式为 Markdown
+hos-evaluate --model ./model --dataset ./test.json \
+    --metrics bleu rouge --output result.md
+
+# 限制评测样本数
+hos-evaluate --model ./model --dataset ./test.json \
+    --max-samples 100
+
+# 使用 4-bit 量化加载（节省显存）
+hos-evaluate --model ./model --dataset ./test.json \
+    --load-in-4bit --metrics bleu rouge
+
+# 指定数据集格式
+hos-evaluate --model ./model --dataset ./test.json \
+    --format alpaca --metrics bleu
+
+# 自定义生成参数
+hos-evaluate --model ./model --dataset ./test.json \
+    --max-new-tokens 512 --temperature 0.8 --top-p 0.95
+```
+
+**Python API 示例**：
+
+```python
+from hos_optimizer.evaluate import EvaluationConfig, evaluate_model
+
+# 创建评测配置
+config = EvaluationConfig(
+    model_path="./model",
+    dataset_path="./test.json",
+    metrics=["bleu", "rouge", "f1"],
+    max_samples=100,
+    max_new_tokens=256,
+    temperature=0.7,
+    output_format="json",
+    output_path="./evaluation_result.json"
+)
+
+# 执行评测
+result = evaluate_model(config)
+
+# 查看结果
+print(f"BLEU: {result.metrics_summary.get('bleu', 0):.2f}")
+print(f"ROUGE: {result.metrics_summary.get('rouge', 0):.2f}")
+print(f"F1: {result.metrics_summary.get('f1', 0):.2f}")
+print(f"评测样本数: {result.total_samples}")
+print(f"耗时: {result.elapsed_seconds:.2f}s")
+```
+
+### 多模型对比评测
+
+对比多个模型在相同数据集上的表现。
+
+```bash
+# 对比两个模型
+hos-evaluate --model ./model_v1 --model ./model_v2 \
+    --dataset ./test.json --metrics bleu rouge f1 \
+    --output comparison.md
+
+# 对比三个模型
+hos-evaluate --model ./base_model --model ./lora_model --model ./merged_model \
+    --dataset ./test.json --metrics bleu rouge \
+    --output-format markdown --output comparison.md
+```
+
+**Python API 示例**：
+
+```python
+from hos_optimizer.evaluate import EvaluationConfig, compare_models
+
+# 创建评测配置
+config = EvaluationConfig(
+    dataset_path="./test.json",
+    metrics=["bleu", "rouge", "f1", "exact_match"],
+    max_samples=50,
+    output_format="markdown",
+    output_path="./model_comparison.md"
+)
+
+# 执行多模型对比
+model_paths = ["./model_v1", "./model_v2", "./model_v3"]
+results = compare_models(model_paths, config)
+
+# 分析结果
+print("\n=== 模型对比结果 ===")
+for result in results:
+    print(f"\n模型: {result.model_path}")
+    for metric, score in result.metrics_summary.items():
+        print(f"  {metric}: {score:.2f}")
+```
+
+### 评测数据集格式
+
+评测模块支持三种数据格式，会自动检测：
+
+#### Alpaca 格式
+
+```json
+[
+  {
+    "instruction": "什么是SQL注入？",
+    "input": "",
+    "output": "SQL注入是一种常见的Web安全漏洞，攻击者通过在应用程序中注入恶意SQL代码..."
+  },
+  {
+    "instruction": "解释XSS攻击",
+    "input": "请举例说明",
+    "output": "XSS（跨站脚本攻击）是一种注入攻击，攻击者向Web页面注入恶意脚本..."
+  }
+]
+```
+
+#### ShareGPT 格式
+
+```json
+[
+  {
+    "conversations": [
+      {"from": "human", "value": "什么是渗透测试？"},
+      {"from": "gpt", "value": "渗透测试是一种模拟恶意攻击者的方法来评估计算机系统或网络安全性..."}
+    ]
+  }
+]
+```
+
+#### Messages 格式
+
+```json
+[
+  {
+    "messages": [
+      {"role": "user", "content": "如何防范DDoS攻击？"},
+      {"role": "assistant", "content": "防范DDoS攻击需要多层次的防御策略..."}
+    ]
+  }
+]
+```
+
+### 自定义评测指标
+
+```python
+from hos_optimizer.evaluate import EvaluationConfig, EvaluationEngine, DatasetLoader
+
+# 加载数据集
+loader = DatasetLoader()
+samples = loader.load("./test.json", dataset_format="alpaca")
+
+# 创建评测引擎
+config = EvaluationConfig(
+    model_path="./model",
+    metrics=["bleu", "rouge"],
+    max_new_tokens=256
+)
+engine = EvaluationEngine(config)
+engine.load_model()
+
+# 生成预测
+predictions = engine.generate_predictions(samples)
+references = [ref for _, ref in samples]
+
+# 计算指标
+metrics = engine.compute_metrics(predictions, references)
+
+# 自定义后处理
+print("评测完成:")
+for metric_name, score in metrics.items():
+    print(f"  {metric_name}: {score:.4f}")
+
+engine.shutdown()
+```
+
+### 评测结果分析
+
+```python
+import json
+from pathlib import Path
+
+# 加载评测结果
+with open("./evaluation_result.json", "r", encoding="utf-8") as f:
+    result = json.load(f)
+
+# 分析样本级别的评测结果
+print(f"总样本数: {result['total_samples']}")
+print(f"平均指标:")
+for metric, score in result['metrics_summary'].items():
+    print(f"  {metric}: {score:.4f}")
+
+# 找出表现最好和最差的样本
+sample_results = result['sample_results']
+if sample_results:
+    # 按综合得分排序
+    for sample in sorted(sample_results, key=lambda x: x['metrics'].get('bleu', 0), reverse=True)[:5]:
+        print(f"\n最佳样本 #{sample['index']}:")
+        print(f"  Prompt: {sample['prompt'][:100]}...")
+        print(f"  BLEU: {sample['metrics'].get('bleu', 0):.4f}")
 ```
 
 ---

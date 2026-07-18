@@ -9,6 +9,7 @@
 - [训练模块 API](#训练模块-api)
 - [部署模块 API](#部署模块-api)
 - [配置模块 API](#配置模块-api)
+- [评测模块 API](#评测模块-api)
 - [工具函数 API](#工具函数-api)
 
 ---
@@ -1188,6 +1189,305 @@ def load_template_from_file(self, name: str, file_path: str) -> None
 **参数**：
 - `name` (str): 注册时使用的模板名称
 - `file_path` (str): YAML 文件路径
+
+---
+
+## 评测模块 API
+
+评测模块位于 `hos_optimizer.evaluate`，提供模型质量评测和多模型对比功能。
+
+### 异常类
+
+#### `EvaluationError`
+
+评测相关异常的基类。
+
+#### `DatasetFormatError`
+
+数据集格式不正确时抛出。
+
+#### `MetricComputeError`
+
+指标计算失败时抛出。
+
+### 数据结构
+
+#### `EvaluationConfig`
+
+评测配置数据类。
+
+```python
+@dataclass
+class EvaluationConfig:
+    # 模型配置
+    model_path: str = ""
+    tokenizer_path: Optional[str] = None
+    trust_remote_code: bool = True
+
+    # 数据集配置
+    dataset_path: str = ""
+    dataset_format: Optional[str] = None  # 自动检测: alpaca / sharegpt / messages
+    max_samples: Optional[int] = None
+    max_seq_length: int = 512
+
+    # 评测指标
+    metrics: List[str] = field(default_factory=lambda: ["bleu", "rouge"])
+
+    # 任务类型
+    task_type: str = "text_generation"
+
+    # 生成参数
+    max_new_tokens: int = 256
+    temperature: float = 0.7
+    top_p: float = 0.9
+    batch_size: int = 1
+
+    # 输出配置
+    output_format: str = "json"
+    output_path: Optional[str] = None
+
+    # 8GB VRAM 优化
+    load_in_4bit: bool = False
+    device_map: str = "auto"
+
+    # 其他
+    seed: int = 42
+    verbose: bool = False
+```
+
+#### `SampleResult`
+
+单条样本的评测结果。
+
+```python
+@dataclass
+class SampleResult:
+    index: int
+    prompt: str
+    reference: str
+    prediction: str
+    metrics: Dict[str, float] = field(default_factory=dict)
+```
+
+#### `EvaluationResult`
+
+评测结果数据类。
+
+```python
+@dataclass
+class EvaluationResult:
+    model_path: str
+    dataset_path: str
+    task_type: str
+    metrics_summary: Dict[str, float] = field(default_factory=dict)
+    sample_results: List[SampleResult] = field(default_factory=list)
+    total_samples: int = 0
+    elapsed_seconds: float = 0.0
+    timestamp: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+```
+
+### 核心类
+
+#### `MetricLoader`
+
+评测指标加载器，封装 HuggingFace evaluate 库和内置指标实现。
+
+```python
+class MetricLoader:
+    SUPPORTED_METRICS = ("ppl", "bleu", "rouge", "exact_match", "f1")
+
+    def __init__(self)
+    def compute(self, metric_name: str, predictions: List[str],
+                references: List[str], model=None, tokenizer=None) -> float
+```
+
+**支持的指标**：
+- `ppl`: 困惑度（Perplexity），基于模型 logits 计算
+- `bleu`: BLEU 分数（n-gram 精确率）
+- `rouge`: ROUGE-L F1 分数
+- `exact_match`: 精确匹配率
+- `f1`: Token 级 F1 分数
+
+**示例**：
+
+```python
+from hos_optimizer.evaluate import MetricLoader
+
+loader = MetricLoader()
+score = loader.compute(
+    metric_name="bleu",
+    predictions=["模型输出文本"],
+    references=["参考文本"]
+)
+print(f"BLEU: {score}")
+```
+
+#### `DatasetLoader`
+
+数据集加载器，支持 JSON/JSONL 格式，自动检测数据格式。
+
+```python
+class DatasetLoader:
+    SUPPORTED_FORMATS = ("alpaca", "sharegpt", "messages")
+
+    def __init__(self)
+    def load(self, dataset_path: str, dataset_format: Optional[str] = None,
+             max_samples: Optional[int] = None) -> List[Tuple[str, str]]
+```
+
+**参数**：
+- `dataset_path` (str): 数据集文件路径（JSON 或 JSONL）
+- `dataset_format` (Optional[str]): 数据格式名称，None 表示自动检测
+- `max_samples` (Optional[int]): 最大样本数，None 表示全部
+
+**返回**：`List[Tuple[str, str]]` - (prompt, reference) 元组列表
+
+**示例**：
+
+```python
+from hos_optimizer.evaluate import DatasetLoader
+
+loader = DatasetLoader()
+samples = loader.load(
+    dataset_path="./test.json",
+    dataset_format=None,  # 自动检测
+    max_samples=100
+)
+for prompt, reference in samples:
+    print(f"Prompt: {prompt[:50]}...")
+    print(f"Reference: {reference[:50]}...")
+```
+
+#### `EvaluationEngine`
+
+评测执行引擎，负责加载模型并执行推理生成。
+
+```python
+class EvaluationEngine:
+    def __init__(self, config: EvaluationConfig)
+    def load_model(self) -> None
+    def generate_predictions(self, samples: List[Tuple[str, str]]) -> List[str]
+    def compute_metrics(self, predictions: List[str],
+                        references: List[str]) -> Dict[str, float]
+    def shutdown(self) -> None
+```
+
+**示例**：
+
+```python
+from hos_optimizer.evaluate import EvaluationConfig, EvaluationEngine
+
+config = EvaluationConfig(
+    model_path="./model",
+    dataset_path="./test.json",
+    metrics=["bleu", "rouge", "f1"],
+    max_new_tokens=256,
+    batch_size=1
+)
+
+engine = EvaluationEngine(config)
+engine.load_model()
+
+# 加载数据
+from hos_optimizer.evaluate import DatasetLoader
+loader = DatasetLoader()
+samples = loader.load("./test.json")
+
+# 生成预测
+predictions = engine.generate_predictions(samples)
+references = [ref for _, ref in samples]
+
+# 计算指标
+metrics = engine.compute_metrics(predictions, references)
+print(metrics)
+
+engine.shutdown()
+```
+
+#### `ResultExporter`
+
+评测结果导出器，支持 JSON 和 Markdown 格式。
+
+```python
+class ResultExporter:
+    @staticmethod
+    def export_json(result: EvaluationResult, output_path: str) -> None
+    @staticmethod
+    def export_markdown(result: EvaluationResult, output_path: str) -> None
+    @staticmethod
+    def export_comparison_json(results: List[EvaluationResult], output_path: str) -> None
+    @staticmethod
+    def export_comparison_markdown(results: List[EvaluationResult], output_path: str) -> None
+```
+
+### 核心函数
+
+#### `evaluate_model()`
+
+统一评测接口，执行完整评测流程。
+
+```python
+def evaluate_model(config: EvaluationConfig) -> EvaluationResult
+```
+
+**参数**：
+- `config` (EvaluationConfig): 评测配置
+
+**返回**：`EvaluationResult` - 评测结果
+
+**示例**：
+
+```python
+from hos_optimizer.evaluate import EvaluationConfig, evaluate_model
+
+config = EvaluationConfig(
+    model_path="./model",
+    dataset_path="./test.json",
+    metrics=["bleu", "rouge"],
+    output_format="json",
+    output_path="./result.json"
+)
+
+result = evaluate_model(config)
+print(f"BLEU: {result.metrics_summary.get('bleu', 0)}")
+print(f"ROUGE: {result.metrics_summary.get('rouge', 0)}")
+```
+
+#### `compare_models()`
+
+多模型对比评测。
+
+```python
+def compare_models(model_paths: List[str], config: EvaluationConfig) -> List[EvaluationResult]
+```
+
+**参数**：
+- `model_paths` (List[str]): 模型路径列表
+- `config` (EvaluationConfig): 评测配置（model_path 会被忽略）
+
+**返回**：`List[EvaluationResult]` - 各模型的评测结果列表
+
+**示例**：
+
+```python
+from hos_optimizer.evaluate import EvaluationConfig, compare_models
+
+config = EvaluationConfig(
+    dataset_path="./test.json",
+    metrics=["bleu", "rouge", "f1"],
+    output_format="markdown",
+    output_path="./comparison.md"
+)
+
+results = compare_models(
+    model_paths=["./model_a", "./model_b", "./model_c"],
+    config=config
+)
+
+for r in results:
+    print(f"{r.model_path}: {r.metrics_summary}")
+```
 
 ---
 

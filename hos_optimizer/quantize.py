@@ -398,60 +398,55 @@ def evaluate_perplexity(
     print(f"数据集: {dataset}")
     
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        # 导入评测模块
+        from hos_optimizer.evaluate import EvaluationEngine, EvaluationConfig, MetricLoader
         
-        # 加载模型和分词器
+        # 创建评测配置
+        config = EvaluationConfig(
+            model_path=model_path,
+            dataset_path="",  # PPL 计算不需要数据集文件
+            metrics=["ppl"],
+            task_type="perplexity",
+            max_samples=max_samples,
+            batch_size=1,
+            device_map="auto",
+        )
+        
+        # 创建评测引擎
+        engine = EvaluationEngine(config)
+        
+        # 加载模型
         print("加载模型...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True
-        )
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-            device_map="auto"
-        )
-        model.eval()
+        engine.load_model()
         
         # 加载评估数据集
         print(f"加载评估数据: {dataset}...")
         from datasets import load_dataset
         
         test_data = load_dataset(dataset, "wikitext-2-raw-v1", split="test")
-        encodings = tokenizer("\n\n".join(test_data["text"]), return_tensors="pt")
+        
+        # 使用参考文本计算 PPL
+        references = []
+        for i, text in enumerate(test_data["text"]):
+            if text and text.strip():
+                references.append(text)
+            if len(references) >= max_samples:
+                break
+        
+        if not references:
+            raise QuantizationError("数据集中没有有效的文本样本")
         
         # 计算 PPL
         print("计算 PPL...")
-        seq_len = encodings.input_ids.size(1)
-        max_length = getattr(model.config, "max_position_embeddings", seq_len)
+        metrics_result = engine.compute_metrics(
+            predictions=references,
+            references=references
+        )
         
-        nlls = []
-        prev_end_loc = 0
+        ppl_value = metrics_result.get("ppl", 0.0)
         
-        for begin_loc in range(0, seq_len, stride):
-            end_loc = min(begin_loc + max_length, seq_len)
-            trg_len = end_loc - prev_end_loc
-            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(model.device)
-            target_ids = input_ids.clone()
-            target_ids[:, :-trg_len] = -100
-            
-            with torch.no_grad():
-                outputs = model(input_ids, labels=target_ids)
-                neg_log_likelihood = outputs.loss
-            
-            nlls.append(neg_log_likelihood)
-            prev_end_loc = end_loc
-            
-            if end_loc == seq_len or len(nlls) >= max_samples:
-                break
-            
-            if len(nlls) % 10 == 0:
-                print(f"  已处理 {len(nlls)} 个样本...")
-        
-        ppl = torch.exp(torch.stack(nlls).mean())
-        ppl_value = ppl.item()
+        # 释放资源
+        engine.shutdown()
         
         print(f"✓ PPL 评估完成: {ppl_value:.2f}")
         return ppl_value
@@ -459,7 +454,7 @@ def evaluate_perplexity(
     except ImportError as e:
         raise QuantizationError(
             f"缺少依赖: {e.name}\n"
-            f"请安装: pip install datasets"
+            f"请安装: pip install datasets evaluate"
         )
     except Exception as e:
         raise QuantizationError(f"PPL 评估失败: {str(e)}")

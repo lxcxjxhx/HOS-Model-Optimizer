@@ -16,12 +16,14 @@ import os
 import json
 import logging
 import argparse
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
 import torch
+from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -29,6 +31,9 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorForSeq2Seq,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
 )
 from peft import (
     LoraConfig,
@@ -182,6 +187,35 @@ class DatasetProcessor:
         text = "\n\n".join(text_parts)
         return {"text": text}
     
+    def format_messages(self, example: Dict) -> Dict:
+        """
+        格式化 messages 格式数据（OpenAI 风格）
+        
+        messages 格式: {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+        
+        Args:
+            example: 数据样本
+            
+        Returns:
+            格式化后的字典
+        """
+        messages = example.get("messages", [])
+        
+        text_parts = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if role == "user":
+                text_parts.append(f"### 用户:\n{content}")
+            elif role == "assistant":
+                text_parts.append(f"### 助手:\n{content}")
+            elif role == "system":
+                text_parts.append(f"### 系统:\n{content}")
+        
+        text = "\n\n".join(text_parts)
+        return {"text": text}
+    
     def tokenize_function(self, example: Dict) -> Dict:
         """
         分词函数
@@ -218,7 +252,7 @@ class DatasetProcessor:
         
         Args:
             dataset: 原始数据集
-            dataset_format: 数据格式 ("alpaca" 或 "sharegpt")
+            dataset_format: 数据格式 ("alpaca", "sharegpt" 或 "messages")
             
         Returns:
             处理后的数据集
@@ -230,8 +264,10 @@ class DatasetProcessor:
             format_func = self.format_alpaca
         elif dataset_format == "sharegpt":
             format_func = self.format_sharegpt
+        elif dataset_format == "messages":
+            format_func = self.format_messages
         else:
-            raise ValueError(f"不支持的数据格式: {dataset_format}")
+            raise ValueError(f"不支持的数据格式: {dataset_format}，支持的格式: alpaca, sharegpt, messages")
         
         # 应用格式化
         dataset = dataset.map(format_func)
@@ -325,15 +361,15 @@ def load_model_and_tokenizer(
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
     加载模型和分词器
-    
+
     Args:
         config: 训练配置
-        
+
     Returns:
         (模型, 分词器) 元组
     """
     logger.info(f"加载模型: {config.model_name_or_path}")
-    
+
     # 检查是否使用 Unsloth
     if config.use_unsloth and UNSLOTH_AVAILABLE and config.finetuning_type == "qlora":
         logger.info("使用 Unsloth 加速加载模型")
@@ -344,36 +380,52 @@ def load_model_and_tokenizer(
             trust_remote_code=config.trust_remote_code,
         )
         return model, tokenizer
-    
+
     # 标准加载流程
     # 获取量化配置
     quantization_config = get_quantization_config(config)
-    
+
     # 加载分词器
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name_or_path,
         trust_remote_code=config.trust_remote_code,
         padding_side="right",
     )
-    
+
     # 设置 pad_token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # 加载模型
+    has_gpu = torch.cuda.is_available()
     model_kwargs = {
         "trust_remote_code": config.trust_remote_code,
-        "device_map": "auto",
     }
-    
+
+    # 只在有 GPU 时使用 device_map
+    if has_gpu:
+        model_kwargs["device_map"] = "auto"
+
     if quantization_config is not None:
         model_kwargs["quantization_config"] = quantization_config
-    
+
+    # 根据 GPU 可用性设置 dtype
+    if has_gpu:
+        model_kwargs["dtype"] = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        model_kwargs["dtype"] = torch.float32
+
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name_or_path,
         **model_kwargs
     )
-    
+
+    # CPU 训练时不需要移动模型
+    if not has_gpu:
+        logger.info("CPU 模式，模型保持在 CPU")
+    else:
+        logger.info(f"GPU 模式，模型已加载到 GPU")
+
     logger.info(f"模型加载完成，参数量: {model.num_parameters() / 1e9:.2f}B")
     return model, tokenizer
 
@@ -390,7 +442,8 @@ def get_lora_config(config: TrainingConfig) -> LoraConfig:
     """
     # 确定目标模块
     if "all" in config.lora_target_modules:
-        target_modules = None  # PEFT 会自动选择所有线性层
+        # 对于 Qwen 模型，明确指定目标模块
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     else:
         target_modules = config.lora_target_modules
     
@@ -403,7 +456,7 @@ def get_lora_config(config: TrainingConfig) -> LoraConfig:
         task_type=TaskType.CAUSAL_LM,
     )
     
-    logger.info(f"LoRA 配置: rank={config.lora_rank}, alpha={config.lora_alpha}")
+    logger.info(f"LoRA 配置: rank={config.lora_rank}, alpha={config.lora_alpha}, targets={target_modules}")
     return lora_config
 
 
@@ -438,16 +491,29 @@ def prepare_model_for_training(
     return model
 
 
-def get_training_arguments(config: TrainingConfig) -> TrainingArguments:
+def get_training_arguments(config: TrainingConfig, dataset_size: int = 1000) -> TrainingArguments:
     """
     获取训练参数
-    
+
     Args:
         config: 训练配置
-        
+        dataset_size: 数据集大小，用于估算总步数
+
     Returns:
         TrainingArguments
     """
+    # 检测是否有 GPU
+    has_gpu = torch.cuda.is_available()
+
+    # 估算总步数（基于数据集大小）
+    steps_per_epoch = dataset_size // (config.per_device_train_batch_size * config.gradient_accumulation_steps)
+    total_steps = steps_per_epoch * config.num_train_epochs
+    warmup_steps = max(1, int(total_steps * config.warmup_ratio))
+
+    # 根据 GPU 可用性设置精度
+    bf16_enabled = has_gpu and torch.cuda.is_bf16_supported()
+    fp16_enabled = has_gpu and not bf16_enabled
+
     training_args = TrainingArguments(
         output_dir=config.output_dir,
         num_train_epochs=config.num_train_epochs,
@@ -455,23 +521,60 @@ def get_training_arguments(config: TrainingConfig) -> TrainingArguments:
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         lr_scheduler_type=config.lr_scheduler_type,
-        warmup_ratio=config.warmup_ratio,
+        warmup_steps=warmup_steps,
         max_grad_norm=config.max_grad_norm,
         weight_decay=config.weight_decay,
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         save_total_limit=config.save_total_limit,
-        bf16=config.bf16,
-        fp16=config.fp16,
-        gradient_checkpointing=config.gradient_checkpointing,
+        bf16=bf16_enabled,
+        fp16=fp16_enabled,
+        gradient_checkpointing=config.gradient_checkpointing if has_gpu else False,
         optim=config.optim,
         seed=config.seed,
-        report_to=["tensorboard"],
+        report_to=[],
         load_best_model_at_end=False,
         remove_unused_columns=False,
     )
-    
+
+    if has_gpu:
+        logger.info(f"检测到 GPU，启用 GPU 加速 (bf16={bf16_enabled}, fp16={fp16_enabled})")
+    else:
+        logger.warning("未检测到 GPU，使用 CPU 训练（速度较慢）")
+
     return training_args
+
+
+class ProgressCallback(TrainerCallback):
+    """训练进度条回调"""
+    
+    def __init__(self):
+        self.pbar = None
+        
+    def on_train_begin(self, args, state, control, **kwargs):
+        """训练开始时初始化进度条"""
+        if state.is_world_process_zero:
+            total_steps = state.max_steps
+            self.pbar = tqdm(total=total_steps, desc="训练进度", unit="step")
+    
+    def on_step_end(self, args, state, control, **kwargs):
+        """每个训练步骤后更新进度条"""
+        if self.pbar is not None and state.is_world_process_zero:
+            self.pbar.update(1)
+            
+            # 显示当前损失和 VRAM 使用情况
+            if state.log_history:
+                last_log = state.log_history[-1]
+                if 'loss' in last_log:
+                    self.pbar.set_postfix({
+                        'loss': f"{last_log['loss']:.4f}",
+                        'lr': f"{last_log.get('learning_rate', 0):.2e}"
+                    })
+    
+    def on_train_end(self, args, state, control, **kwargs):
+        """训练结束时关闭进度条"""
+        if self.pbar is not None:
+            self.pbar.close()
 
 
 class VRAMCallback(TrainerCallback):
@@ -520,8 +623,8 @@ def train(config: TrainingConfig):
     # 准备模型进行训练
     model = prepare_model_for_training(model, config)
     
-    # 获取训练参数
-    training_args = get_training_arguments(config)
+    # 获取训练参数（传递数据集大小）
+    training_args = get_training_arguments(config, dataset_size=len(dataset_dict["train"]))
     logger.info(f"训练参数: {training_args}")
     
     # 数据整理器
@@ -538,7 +641,7 @@ def train(config: TrainingConfig):
         train_dataset=dataset_dict["train"],
         eval_dataset=dataset_dict["test"],
         data_collator=data_collator,
-        callbacks=[VRAMCallback()],
+        callbacks=[ProgressCallback(), VRAMCallback()],
     )
     
     # 开始训练
@@ -559,6 +662,53 @@ def train(config: TrainingConfig):
     logger.info(f"训练损失: {train_result.training_loss:.4f}")
     logger.info(f"训练时间: {train_result.metrics.get('train_runtime', 0):.2f} 秒")
     logger.info("=" * 60)
+
+
+def backup_model(
+    model_path: str,
+    backup_dir: str = "./backups",
+    backup_name: Optional[str] = None
+) -> str:
+    """
+    备份模型到指定目录
+    
+    Args:
+        model_path: 模型路径
+        backup_dir: 备份目录
+        backup_name: 备份名称（默认使用时间戳）
+        
+    Returns:
+        备份路径
+    """
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"模型路径不存在: {model_path}")
+    
+    # 创建备份目录
+    os.makedirs(backup_dir, exist_ok=True)
+    
+    # 生成备份名称
+    if backup_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_name = os.path.basename(model_path)
+        backup_name = f"{model_name}_{timestamp}"
+    
+    backup_path = os.path.join(backup_dir, backup_name)
+    
+    # 如果备份已存在，跳过
+    if os.path.exists(backup_path):
+        logger.info(f"备份已存在: {backup_path}")
+        return backup_path
+    
+    logger.info(f"开始备份模型: {model_path} -> {backup_path}")
+    
+    # 复制模型文件
+    if os.path.isdir(model_path):
+        shutil.copytree(model_path, backup_path, symlinks=False, ignore_dangling_symlinks=True)
+    else:
+        shutil.copy2(model_path, backup_path)
+    
+    logger.info(f"模型备份完成: {backup_path}")
+    return backup_path
 
 
 def merge_model(
@@ -585,7 +735,7 @@ def merge_model(
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_path,
         trust_remote_code=trust_remote_code,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         device_map="auto",
     )
     
@@ -640,7 +790,7 @@ def main():
     parser.add_argument(
         "--format",
         type=str,
-        choices=["alpaca", "sharegpt"],
+        choices=["alpaca", "sharegpt", "messages"],
         default="alpaca",
         help="数据格式"
     )
@@ -691,7 +841,7 @@ def main():
         merge_model(
             base_model_path=args.model,
             adapter_path=args.adapter_path,
-            output_dir=args.output,
+            output_path=args.output,
         )
     else:
         # 训练
@@ -702,7 +852,7 @@ def main():
             merge_model(
                 base_model_path=args.model,
                 adapter_path=args.output,
-                output_dir=f"{args.output}_merged",
+                output_path=f"{args.output}_merged",
             )
 
 
