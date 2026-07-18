@@ -67,9 +67,32 @@ hos-evaluate --model ./model --dataset ./test.json --metrics bleu rouge
 ```
 
 ## Installation
+
+### 从 GitHub 安装（推荐）
 ```bash
+# 克隆仓库
+git clone https://github.com/lxcxjxhx/HOS-Model-Optimizer.git
 cd HOS-Model-Optimizer
+
+# 安装
 pip install -e .
+
+# 或安装全部依赖
+pip install -e ".[all]"
+```
+
+### 直接从 GitHub 安装
+```bash
+pip install git+https://github.com/lxcxjxhx/HOS-Model-Optimizer.git
+```
+
+### 按需安装
+```bash
+pip install -e ".[quantization]"   # 量化相关
+pip install -e ".[inference]"      # llama-cpp 推理
+pip install -e ".[vllm]"           # vLLM 推理
+pip install -e ".[sglang]"         # SGLang 推理
+pip install -e ".[training]"       # 训练加速
 ```
 
 ## Python API

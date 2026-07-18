@@ -73,13 +73,16 @@ hos-config --generate --scenario inference_7b --model-path ./model
 ### 安装方式
 
 ```bash
-# 从源码安装
-git clone https://github.com/hos-team/hos-model-optimizer.git
+# 从 GitHub 安装（推荐）
+git clone https://github.com/lxcxjxhx/HOS-Model-Optimizer.git
 cd HOS-Model-Optimizer
 pip install -e .
 
 # 安装可选依赖
 pip install -e ".[all]"
+
+# 或直接从 GitHub 安装
+pip install git+https://github.com/lxcxjxhx/HOS-Model-Optimizer.git
 ```
 
 详细安装指南请参考 [INSTALL.md](INSTALL.md)。
