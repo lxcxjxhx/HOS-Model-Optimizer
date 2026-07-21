@@ -67,14 +67,19 @@ class TestConfigLoading:
                 "max_model_len": 512
             }
         }
-        
-        # 创建 YAML 文件
+
+        # 创建物理文件（load_config 先检查文件存在性再调 yaml）
+        import yaml as real_yaml
+        with open(config_path, "w", encoding="utf-8") as f:
+            real_yaml.dump(config_data, f)
+
         with patch("hos_optimizer.config.yaml") as mock_yaml:
             mock_yaml.safe_load.return_value = config_data
-            
+            mock_yaml.YAMLError = real_yaml.YAMLError
+
             manager = ConfigManager()
             result = manager.load_config(config_path)
-            
+
             assert result == config_data
 
     def test_load_config_file_not_found(self, tmp_dir):
@@ -100,42 +105,49 @@ class TestConfigLoading:
     def test_load_config_yaml_error(self, tmp_dir):
         """测试 YAML 解析错误"""
         config_path = os.path.join(tmp_dir, "invalid.yaml")
-        
+        # 创建物理文件，使文件存在性检查通过
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write("invalid: yaml: content")
+
         with patch("hos_optimizer.config.yaml") as mock_yaml:
             mock_yaml.safe_load.side_effect = Exception("YAML parse error")
             mock_yaml.YAMLError = Exception
-            
+
             manager = ConfigManager()
-            
+
             with pytest.raises(ConfigError) as exc_info:
                 manager.load_config(config_path)
-            
+
             assert "YAML 解析失败" in str(exc_info.value)
 
     def test_load_config_empty_file(self, tmp_dir):
         """测试加载空配置文件"""
         config_path = os.path.join(tmp_dir, "empty.yaml")
-        
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write("")
+
         with patch("hos_optimizer.config.yaml") as mock_yaml:
             mock_yaml.safe_load.return_value = None
-            
+
             manager = ConfigManager()
             result = manager.load_config(config_path)
-            
+
             assert result == {}
 
     def test_load_config_invalid_structure(self, tmp_dir):
         """测试配置文件结构不是字典"""
         config_path = os.path.join(tmp_dir, "list_config.yaml")
-        
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write("[1, 2, 3]")
+
         with patch("hos_optimizer.config.yaml") as mock_yaml:
             mock_yaml.safe_load.return_value = [1, 2, 3]  # 列表而不是字典
-            
+
             manager = ConfigManager()
-            
+
             with pytest.raises(ConfigError) as exc_info:
                 manager.load_config(config_path)
-            
+
             assert "配置文件顶层结构必须是字典" in str(exc_info.value)
 
 
@@ -668,7 +680,11 @@ class TestTemplateManagement:
             "backend": "custom",
             "model": {"path": ""}
         }
-        
+        # 创建物理文件
+        import yaml as real_yaml
+        with open(config_path, "w", encoding="utf-8") as f:
+            real_yaml.dump(template_data, f)
+
         with patch("hos_optimizer.config.yaml") as mock_yaml:
             mock_yaml.safe_load.return_value = template_data
             

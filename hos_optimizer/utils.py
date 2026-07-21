@@ -164,7 +164,8 @@ def is_model_path(path: str) -> bool:
     if os.path.exists(path):
         return True
     # HF Hub ID 格式检查（如 "Qwen/Qwen2.5-0.5B"）
-    if "/" in path and not os.path.sep in path.replace("/", os.path.sep):
+    # 确保路径包含 / 且不含平台原生路径分隔符
+    if "/" in path and "\\" not in path:
         parts = path.split("/")
         if len(parts) == 2 and all(parts):
             return True
@@ -185,9 +186,53 @@ def get_model_format(path: str) -> str:
         return "gguf"
     if os.path.isdir(path):
         files = find_model_files(path)
-        for f in files:
-            if f.endswith(".safetensors"):
-                return "safetensors"
-            if f.endswith((".bin", ".pt")):
-                return "pytorch"
+        has_safetensors = any(f.endswith(".safetensors") for f in files)
+        has_pytorch = any(f.endswith((".bin", ".pt")) for f in files)
+        if has_safetensors:
+            return "safetensors"
+        if has_pytorch:
+            return "pytorch"
     return "unknown"
+
+
+# ============================================================
+# 安全设置
+# ============================================================
+
+_TRUST_REMOTE_CODE_WARNED = False
+
+
+def get_trust_remote_code(setting: Optional[bool] = None) -> bool:
+    """获取 trust_remote_code 配置值。
+
+    HuggingFace 模型的 trust_remote_code 允许加载远程自定义代码，
+    存在供应链安全风险。优先使用传入的参数，其次读取环境变量
+    ``HOS_TRUST_REMOTE_CODE``（"0"=False，其他为 True），
+    默认返回 True（保持兼容性）。
+
+    当返回 True 时会输出安全警告。
+
+    Args:
+        setting: 调用方传入的 trust_remote_code 值，None 表示未指定
+
+    Returns:
+        True 或 False
+    """
+    global _TRUST_REMOTE_CODE_WARNED
+
+    if setting is not None:
+        result = setting
+    else:
+        env = os.environ.get("HOS_TRUST_REMOTE_CODE", "1")
+        result = env not in ("0", "false", "False", "no")
+
+    if result and not _TRUST_REMOTE_CODE_WARNED:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "trust_remote_code=True: 正在加载远程模型的自定义代码，"
+            "请确保模型来源可信。可通过环境变量 "
+            "HOS_TRUST_REMOTE_CODE=0 禁用。"
+        )
+        _TRUST_REMOTE_CODE_WARNED = True
+
+    return result

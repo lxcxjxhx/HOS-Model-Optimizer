@@ -16,11 +16,9 @@ import os
 import json
 import logging
 import argparse
-import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
 
 import torch
 from tqdm import tqdm
@@ -44,23 +42,25 @@ from peft import (
 )
 from datasets import load_dataset, Dataset, DatasetDict
 
-# 尝试导入 Unsloth（可选加速）
-try:
-    from unsloth import FastLanguageModel
-    UNSLOTH_AVAILABLE = True
-except ImportError:
-    UNSLOTH_AVAILABLE = False
-    logging.warning("Unsloth 未安装，将使用标准训练流程。安装命令: pip install unsloth")
+# 尝试导入 Unsloth（可选加速，延迟到实际使用时才导入）
+# 注意：unsloth 在无 GPU 环境下会抛出 NotImplementedError
+_UNSLOTH_AVAILABLE = None  # None = 未检查, True/False = 已检查
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('training.log', encoding='utf-8')
-    ]
-)
+
+def _is_unsloth_available() -> bool:
+    """延迟检查 unsloth 是否可用（避免无 GPU 时模块级导入失败）"""
+    global _UNSLOTH_AVAILABLE
+    if _UNSLOTH_AVAILABLE is None:
+        try:
+            import unsloth  # noqa: F401
+            _UNSLOTH_AVAILABLE = True
+            logger.debug("Unsloth 可用，训练将获得加速")
+        except (ImportError, NotImplementedError):
+            _UNSLOTH_AVAILABLE = False
+            logger.info("Unsloth 不可用，将使用标准训练流程。安装命令: pip install unsloth")
+    return _UNSLOTH_AVAILABLE
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,7 +70,7 @@ class TrainingConfig:
     
     # 模型配置
     model_name_or_path: str = "Qwen/Qwen2.5-0.5B"
-    trust_remote_code: bool = True
+    trust_remote_code: bool = True  # 可通过 HOS_TRUST_REMOTE_CODE 环境变量覆盖
     
     # 训练方法
     finetuning_type: str = "qlora"  # "qlora" 或 "lora"
@@ -371,8 +371,9 @@ def load_model_and_tokenizer(
     logger.info(f"加载模型: {config.model_name_or_path}")
 
     # 检查是否使用 Unsloth
-    if config.use_unsloth and UNSLOTH_AVAILABLE and config.finetuning_type == "qlora":
+    if config.use_unsloth and _is_unsloth_available() and config.finetuning_type == "qlora":
         logger.info("使用 Unsloth 加速加载模型")
+        from unsloth import FastLanguageModel
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=config.model_name_or_path,
             max_seq_length=config.max_seq_length,
@@ -506,7 +507,8 @@ def get_training_arguments(config: TrainingConfig, dataset_size: int = 1000) -> 
     has_gpu = torch.cuda.is_available()
 
     # 估算总步数（基于数据集大小）
-    steps_per_epoch = dataset_size // (config.per_device_train_batch_size * config.gradient_accumulation_steps)
+    denom = config.per_device_train_batch_size * config.gradient_accumulation_steps
+    steps_per_epoch = max(1, dataset_size // denom) if denom > 0 else 1
     total_steps = steps_per_epoch * config.num_train_epochs
     warmup_steps = max(1, int(total_steps * config.warmup_ratio))
 
@@ -577,9 +579,25 @@ class ProgressCallback(TrainerCallback):
             self.pbar.close()
 
 
+def _setup_train_logger():
+    """配置训练日志（流 + 文件），仅在执行 train() 时调用"""
+    logger.setLevel(logging.INFO)
+
+    # 避免重复添加 handler
+    if logger.handlers:
+        return
+
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
 class VRAMCallback(TrainerCallback):
     """VRAM 监控回调"""
-    
+
     def on_log(self, args, state, control, logs=None, **kwargs):
         """在日志记录时输出 VRAM 使用情况"""
         if torch.cuda.is_available():
@@ -601,10 +619,13 @@ class VRAMCallback(TrainerCallback):
 def train(config: TrainingConfig):
     """
     执行训练
-    
+
     Args:
         config: 训练配置
     """
+    # 仅在执行训练时配置日志，避免模块导入时产生副作用
+    _setup_train_logger()
+
     logger.info("=" * 60)
     logger.info("开始训练流程")
     logger.info("=" * 60)
@@ -662,53 +683,6 @@ def train(config: TrainingConfig):
     logger.info(f"训练损失: {train_result.training_loss:.4f}")
     logger.info(f"训练时间: {train_result.metrics.get('train_runtime', 0):.2f} 秒")
     logger.info("=" * 60)
-
-
-def backup_model(
-    model_path: str,
-    backup_dir: str = "./backups",
-    backup_name: Optional[str] = None
-) -> str:
-    """
-    备份模型到指定目录
-    
-    Args:
-        model_path: 模型路径
-        backup_dir: 备份目录
-        backup_name: 备份名称（默认使用时间戳）
-        
-    Returns:
-        备份路径
-    """
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"模型路径不存在: {model_path}")
-    
-    # 创建备份目录
-    os.makedirs(backup_dir, exist_ok=True)
-    
-    # 生成备份名称
-    if backup_name is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_name = os.path.basename(model_path)
-        backup_name = f"{model_name}_{timestamp}"
-    
-    backup_path = os.path.join(backup_dir, backup_name)
-    
-    # 如果备份已存在，跳过
-    if os.path.exists(backup_path):
-        logger.info(f"备份已存在: {backup_path}")
-        return backup_path
-    
-    logger.info(f"开始备份模型: {model_path} -> {backup_path}")
-    
-    # 复制模型文件
-    if os.path.isdir(model_path):
-        shutil.copytree(model_path, backup_path, symlinks=False, ignore_dangling_symlinks=True)
-    else:
-        shutil.copy2(model_path, backup_path)
-    
-    logger.info(f"模型备份完成: {backup_path}")
-    return backup_path
 
 
 def merge_model(

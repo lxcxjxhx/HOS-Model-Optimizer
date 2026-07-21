@@ -116,72 +116,64 @@ class TestGGUFQuantization:
         model_path = os.path.join(tmp_dir, "model")
         output_path = os.path.join(tmp_dir, "model.gguf")
         llama_cpp_path = "/path/to/llama.cpp"
-        
-        # Mock 所有依赖
+
+        # Mock subprocess + 使 convert.py 看起来存在
         with patch("subprocess.run") as mock_run, \
-             patch("hos_optimizer.quantize.AutoModelForCausalLM") as mock_model_cls, \
-             patch("hos_optimizer.quantize.AutoTokenizer") as mock_tokenizer_cls, \
+             patch("hos_optimizer.quantize._find_convert_script") as mock_find, \
              patch("tempfile.TemporaryDirectory") as mock_tmpdir:
-            
-            # Mock subprocess 调用
-            mock_run.return_value = MagicMock(returncode=0)
-            
-            # Mock 临时目录
-            mock_tmpdir.return_value.__enter__.return_value = tmp_dir
-            
-            # Mock 模型和分词器
-            mock_model = MagicMock()
-            mock_tokenizer = MagicMock()
-            mock_model_cls.from_pretrained.return_value = mock_model
-            mock_tokenizer_cls.from_pretrained.return_value = mock_tokenizer
-            
-            result = quantize_gguf(
-                model_path=model_path,
-                output_path=output_path,
-                quant_type="Q4_K_M",
-                llama_cpp_path=llama_cpp_path
-            )
-            
+
+            mock_find.return_value = os.path.join(llama_cpp_path, "convert.py")
+            # 让 os.path.isfile 对 convert.py 返回 True（最低限度模拟文件存在）
+            with patch("os.path.isfile", return_value=True):
+                mock_run.return_value = MagicMock(returncode=0)
+                mock_tmpdir.return_value.__enter__.return_value = tmp_dir
+
+                result = quantize_gguf(
+                    model_path=model_path,
+                    output_path=output_path,
+                    quant_type="Q4_K_M",
+                    llama_cpp_path=llama_cpp_path
+                )
+
             assert result == output_path
-            # 验证调用了转换和量化命令
+            # 验证调用了检查工具 + 转换 + 量化 3 次
             assert mock_run.call_count >= 2
 
     def test_quantize_gguf_tool_not_found(self, tmp_dir):
         """测试 GGUF 量化工具不存在的情况"""
         model_path = os.path.join(tmp_dir, "model")
         output_path = os.path.join(tmp_dir, "model.gguf")
-        
+
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError()
-            
+
             with pytest.raises(QuantizationError) as exc_info:
                 quantize_gguf(model_path, output_path)
-            
+
             assert "找不到 llama-quantize 工具" in str(exc_info.value)
 
     def test_quantize_gguf_conversion_failed(self, tmp_dir):
         """测试 GGUF 量化转换失败的情况"""
         model_path = os.path.join(tmp_dir, "model")
         output_path = os.path.join(tmp_dir, "model.gguf")
-        
+
         with patch("subprocess.run") as mock_run, \
-             patch("hos_optimizer.quantize.AutoModelForCausalLM") as mock_model_cls, \
-             patch("hos_optimizer.quantize.AutoTokenizer") as mock_tokenizer_cls, \
+             patch("hos_optimizer.quantize._find_convert_script") as mock_find, \
              patch("tempfile.TemporaryDirectory") as mock_tmpdir:
-            
-            # 第一次调用成功（检查工具），第二次调用失败（转换）
-            mock_run.side_effect = [
-                MagicMock(returncode=0),  # 检查工具
-                subprocess.CalledProcessError(1, "convert", stderr="Conversion failed")
-            ]
-            
+
+            mock_find.return_value = os.path.join(tmp_dir, "convert.py")
             mock_tmpdir.return_value.__enter__.return_value = tmp_dir
-            mock_model_cls.from_pretrained.return_value = MagicMock()
-            mock_tokenizer_cls.from_pretrained.return_value = MagicMock()
-            
-            with pytest.raises(QuantizationError) as exc_info:
-                quantize_gguf(model_path, output_path)
-            
+
+            # 第一次调用成功（检查工具），第二次调用失败（转换）
+            with patch("os.path.isfile", return_value=True):
+                mock_run.side_effect = [
+                    MagicMock(returncode=0),  # 检查工具
+                    subprocess.CalledProcessError(1, "convert", stderr="Conversion failed")
+                ]
+
+                with pytest.raises(QuantizationError) as exc_info:
+                    quantize_gguf(model_path, output_path)
+
             assert "GGUF 量化失败" in str(exc_info.value)
 
 
@@ -444,7 +436,7 @@ class TestFormatConversion:
                 to_format="hf"
             )
         
-        assert "尚未实现" in str(exc_info.value)
+        assert "GGUF" in str(exc_info.value) and "转换" in str(exc_info.value)
 
 
 class TestModelSize:
@@ -467,9 +459,9 @@ class TestModelSize:
         assert size < 0.01  # 应该约等于 0.001GB
 
     def test_get_model_size_nonexistent_dir(self):
-        """测试不存在的目录"""
-        with pytest.raises(Exception):
-            get_model_size("/nonexistent/path")
+        """测试不存在的目录（返回 0 而非抛出异常）"""
+        size = get_model_size("/nonexistent/path")
+        assert size == 0.0
 
 
 if __name__ == "__main__":

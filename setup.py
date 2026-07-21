@@ -34,7 +34,7 @@ setup(
     description="HOS 小模型优化工具",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/hos-team/hos-model-optimizer",
+    url="https://github.com/lxcxjxhx/HOS-Model-Optimizer",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -109,7 +109,7 @@ setup(
     },
     keywords="llm optimization quantization inference training deployment",
     project_urls={
-        "Bug Reports": "https://github.com/hos-team/hos-model-optimizer/issues",
-        "Source": "https://github.com/hos-team/hos-model-optimizer",
+        "Bug Reports": "https://github.com/lxcxjxhx/HOS-Model-Optimizer/issues",
+        "Source": "https://github.com/lxcxjxhx/HOS-Model-Optimizer",
     },
 )

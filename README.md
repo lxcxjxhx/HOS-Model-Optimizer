@@ -312,5 +312,5 @@ copies or substantial portions of the Software.
 - [使用示例](EXAMPLES.md) - 完整使用示例
 - [API 文档](API.md) - Python API 参考
 - [架构文档](docs/architecture.md) - 系统架构说明
-- [问题反馈](https://github.com/hos-team/hos-model-optimizer/issues)
-- [项目源码](https://github.com/hos-team/hos-model-optimizer)
+- [问题反馈](https://github.com/lxcxjxhx/HOS-Model-Optimizer/issues)
+- [项目源码](https://github.com/lxcxjxhx/HOS-Model-Optimizer)

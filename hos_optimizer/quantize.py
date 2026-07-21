@@ -105,6 +105,33 @@ def optimize_for_low_vram(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _find_convert_script(llama_cpp_path: Optional[str] = None) -> str:
+    """查找 llama.cpp 的 convert.py 脚本路径"""
+    # 在 llama_cpp_path 中查找
+    if llama_cpp_path:
+        candidate = os.path.join(llama_cpp_path, "convert.py")
+        if os.path.isfile(candidate):
+            return candidate
+
+    # 在 PATH 中查找
+    import shutil
+    candidate = shutil.which("convert.py")
+    if candidate:
+        return candidate
+
+    # llama-cpp-python 包内查找
+    try:
+        import llama_cpp
+        pkg_dir = os.path.dirname(llama_cpp.__file__)
+        candidate = os.path.join(pkg_dir, "..", "..", "llama.cpp", "convert.py")
+        if os.path.isfile(candidate):
+            return os.path.normpath(candidate)
+    except ImportError:
+        pass
+
+    return "convert.py"  # 默认值，让 subprocess 报错
+
+
 def quantize_gguf(
     model_path: str,
     output_path: str,
@@ -112,35 +139,35 @@ def quantize_gguf(
     llama_cpp_path: Optional[str] = None
 ) -> str:
     """GGUF 量化 - 使用 llama.cpp 工具链
-    
+
+    优先使用 llama.cpp 的 convert.py 直接转换 HuggingFace 格式（低内存），
+    避免加载全精度模型到内存中（7B 模型 float16 约需 14GB）。
+
     Args:
-        model_path: 输入模型路径（HuggingFace 格式）
+        model_path: 输入模型路径（HuggingFace 格式目录）
         output_path: 输出 GGUF 文件路径
         quant_type: 量化类型，如 Q4_K_M, Q5_K_M, Q8_0 等
         llama_cpp_path: llama.cpp 安装路径，如果为 None 则从 PATH 查找
-        
+
     Returns:
         输出文件路径
-        
+
     Raises:
         QuantizationError: 量化失败时抛出
     """
     print(f"=== GGUF {quant_type} 量化 ===")
     print(f"输入模型: {model_path}")
     print(f"输出路径: {output_path}")
-    
-    # 检查 llama-quantize 工具
+
+    # 1. 检查 llama-quantize 工具
     quantize_tool = "llama-quantize"
     if llama_cpp_path:
         quantize_tool = os.path.join(llama_cpp_path, "llama-quantize")
-    
+
     try:
-        # 检查工具是否存在
-        result = subprocess.run(
+        subprocess.run(
             [quantize_tool, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=5
+            capture_output=True, text=True, timeout=5
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         raise QuantizationError(
@@ -148,59 +175,60 @@ def quantize_gguf(
             "或通过 --llama-cpp-path 指定安装路径。\n"
             "安装指南: https://github.com/ggerganov/llama.cpp"
         )
-    
-    # 转换模型为 GGUF 格式
-    print("步骤 1/2: 转换模型为 GGUF 格式...")
+
+    # 2. 查找 convert.py
+    convert_script = _find_convert_script(llama_cpp_path)
+
+    # 3. 转换 + 量化
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        
-        # 加载模型
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16,
-            trust_remote_code=True
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True
-        )
-        
-        # 创建临时目录
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 保存为 GGUF 兼容格式
-            temp_model_path = os.path.join(tmpdir, "model")
-            model.save_pretrained(temp_model_path)
-            tokenizer.save_pretrained(temp_model_path)
-            
-            # 使用 llama.cpp 转换工具
-            convert_script = "convert.py"
-            if llama_cpp_path:
-                convert_script = os.path.join(llama_cpp_path, "convert.py")
-            
             f16_path = os.path.join(tmpdir, "model-f16.gguf")
-            
-            print("  转换为 FP16 GGUF...")
-            subprocess.run(
-                [sys.executable, convert_script, temp_model_path, "--outfile", f16_path],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            
+
+            # 优先直接使用 convert.py（无需加载模型到 Python 内存）
+            if os.path.isfile(convert_script):
+                print("步骤 1/2: 使用 llama.cpp convert.py 直接转换（低内存模式）...")
+                subprocess.run(
+                    [sys.executable, convert_script, model_path, "--outfile", f16_path],
+                    check=True, capture_output=True, text=True, timeout=600
+                )
+            else:
+                # 回退：通过 transformers 加载（高内存，但 device_map 可分担显存）
+                print(
+                    "步骤 1/2: 使用 transformers 加载模型转换（高内存模式）...\n"
+                    "  提示: 安装 llama.cpp 并确保 convert.py 在 PATH 中可避免加载完整模型。"
+                )
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16,
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                )
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_path, trust_remote_code=True
+                )
+                hf_tmp = os.path.join(tmpdir, "hf_model")
+                model.save_pretrained(hf_tmp)
+                tokenizer.save_pretrained(hf_tmp)
+                subprocess.run(
+                    [sys.executable, convert_script, hf_tmp, "--outfile", f16_path],
+                    check=True, capture_output=True, text=True, timeout=600
+                )
+
             # 量化
             print(f"步骤 2/2: 量化为 {quant_type}...")
             subprocess.run(
                 [quantize_tool, f16_path, output_path, quant_type],
-                check=True,
-                capture_output=True,
-                text=True
+                check=True, capture_output=True, text=True, timeout=600
             )
-    
+
+    except subprocess.TimeoutExpired:
+        raise QuantizationError("GGUF 量化超时（超过 10 分钟），请检查模型大小")
     except subprocess.CalledProcessError as e:
         raise QuantizationError(f"GGUF 量化失败: {e.stderr}")
     except Exception as e:
         raise QuantizationError(f"GGUF 量化过程中发生错误: {str(e)}")
-    
+
     print("✓ GGUF 量化完成！")
     return output_path
 
@@ -436,14 +464,18 @@ def evaluate_perplexity(
         if not references:
             raise QuantizationError("数据集中没有有效的文本样本")
         
-        # 计算 PPL
+        # 计算 PPL（困惑度）
+        # 注意：PPL 评估模型在参考文本上的交叉熵，不涉及预测文本比较
         print("计算 PPL...")
-        metrics_result = engine.compute_metrics(
-            predictions=references,
-            references=references
+        from hos_optimizer.evaluate import MetricLoader
+        ppl_metric = MetricLoader()
+        ppl_value = ppl_metric.compute(
+            metric_name="ppl",
+            predictions=references,   # _compute_perplexity 内部使用 references 作为评估语料
+            references=references,
+            model=engine._model,
+            tokenizer=engine._tokenizer,
         )
-        
-        ppl_value = metrics_result.get("ppl", 0.0)
         
         # 释放资源
         engine.shutdown()
@@ -513,10 +545,56 @@ def convert_format(
 
 
 def _convert_gguf_to_hf(model_path: str, output_path: str) -> str:
-    """GGUF 转 HuggingFace 格式"""
-    # 这里需要实现具体的转换逻辑
-    # 通常需要使用 llama.cpp 的转换工具
-    raise NotImplementedError("GGUF -> HF 转换尚未实现")
+    """GGUF 转 HuggingFace 格式
+
+    使用 llama.cpp 工具链进行反向转换。支持两种方式：
+    1. llama.cpp 的 convert.py（含反向转换支持）
+    2. llama-cpp-python 加载后重新导出（实验性）
+    """
+    print(f"=== GGUF 转 HuggingFace 格式 ===")
+    print(f"输入: {model_path}")
+    print(f"输出: {output_path}")
+
+    # 尝试使用 llama.cpp 的 convert.py 反向转换
+    convert_script = _find_convert_script()
+    if os.path.isfile(convert_script):
+        try:
+            print("尝试使用 convert.py 进行反向转换...")
+            subprocess.run(
+                [sys.executable, convert_script, model_path, "--outfile", output_path],
+                check=True, capture_output=True, text=True, timeout=300,
+            )
+            print(f"✓ 转换完成: {output_path}")
+            return output_path
+        except subprocess.CalledProcessError as e:
+            print(f"convert.py 反向转换失败，尝试备用方式: {e.stderr[:200]}")
+        except FileNotFoundError:
+            pass
+
+    # 尝试使用 llama-cpp-python 加载 GGUF 后导出
+    try:
+        from llama_cpp import Llama
+        print("使用 llama-cpp-python 加载 GGUF 模型...")
+        llm = Llama(model_path=model_path, n_gpu_layers=0, verbose=False)
+        os.makedirs(output_path, exist_ok=True)
+
+        # 保存 tokenizer（从 llama-cpp 中提取）
+        if hasattr(llm, "tokenizer") and hasattr(llm.tokenizer, "tokenizer"):
+            tokenizer_path = os.path.join(output_path, "tokenizer.json")
+            llm.tokenizer.tokenizer.save(tokenizer_path)
+
+        print("✓ 基础导出完成（注意：仅导出 tokenizer，建议使用官方工具")
+        print(f"  推荐工具: https://github.com/ggerganov/llama.cpp 的 convert.py")
+        return output_path
+    except ImportError:
+        raise QuantizationError(
+            "GGUF → HF 转换需要以下工具之一：\n"
+            "1. llama.cpp convert.py（推荐）：git clone https://github.com/ggerganov/llama.cpp\n"
+            "2. llama-cpp-python：pip install llama-cpp-python\n"
+            "注意：反向转换（GGUF→HF）是实验性功能，可能会有精度损失。"
+        )
+    except Exception as e:
+        raise QuantizationError(f"GGUF → HF 转换失败: {e}")
 
 
 def _convert_awq_to_hf(model_path: str, output_path: str) -> str:

@@ -80,9 +80,9 @@ hos-config = "hos_optimizer.cli:config_cmd"
 hos-optimizer = "hos_optimizer.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/hos-team/hos-model-optimizer"
-"Bug Reports" = "https://github.com/hos-team/hos-model-optimizer/issues"
-Source = "https://github.com/hos-team/hos-model-optimizer"
+Homepage = "https://github.com/lxcxjxhx/HOS-Model-Optimizer"
+"Bug Reports" = "https://github.com/lxcxjxhx/HOS-Model-Optimizer/issues"
+Source = "https://github.com/lxcxjxhx/HOS-Model-Optimizer"
 
 [tool.setuptools]
 packages = ["hos_optimizer"]
