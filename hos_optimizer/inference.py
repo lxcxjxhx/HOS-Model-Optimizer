@@ -424,7 +424,7 @@ class LlamaCppBackend(InferenceBackend):
         策略：
         - 获取 GPU 总显存
         - 保留 1024MB 给 KV cache 和运行时
-        - 按每层约 100MB 估算（粗略值，取决于模型大小）
+        - 从模型 config.json 读取实际层数（如不可用则按模型大小估算）
         - 对于小模型（< 1B），通常可以全部 offload
         """
         total_vram_mb = get_total_gpu_memory_mb()
@@ -437,6 +437,9 @@ class LlamaCppBackend(InferenceBackend):
         if available_mb <= 0:
             return 0
 
+        # 尝试读取模型 config.json 获取实际层数
+        total_layers = self._try_get_num_hidden_layers(self.model_path)
+
         # 尝试估算模型大小（通过文件大小粗略判断）
         try:
             model_size_mb = os.path.getsize(self.model_path) / (1024 * 1024)
@@ -448,17 +451,52 @@ class LlamaCppBackend(InferenceBackend):
         if model_size_mb <= available_mb:
             return -1  # -1 表示全部 offload
 
-        # 否则按比例估算可 offload 的层数
-        # 假设模型有 32 层（常见配置），按大小比例分配
-        estimated_total_layers = 32
+        # 按比例估算可 offload 的层数
         offload_ratio = available_mb / model_size_mb
-        optimal_layers = max(1, int(estimated_total_layers * offload_ratio))
+        optimal_layers = max(1, int(total_layers * offload_ratio))
         logger.info(
             f"显存估算: 总 VRAM={total_vram_mb:.0f}MB, "
             f"模型大小≈{model_size_mb:.0f}MB, "
-            f"可 offload {optimal_layers}/{estimated_total_layers} 层"
+            f"模型层数={total_layers}, "
+            f"可 offload {optimal_layers}/{total_layers} 层"
         )
         return optimal_layers
+
+    @staticmethod
+    def _try_get_num_hidden_layers(model_path: str) -> int:
+        """尝试从模型 config.json 读取层数，失败则按模型大小估算"""
+        # 查找 config.json
+        config_path = None
+        if os.path.isdir(model_path):
+            config_path = os.path.join(model_path, "config.json")
+        elif os.path.isfile(model_path):
+            # GGUF 文件：在同级目录找 config.json
+            config_path = os.path.join(os.path.dirname(model_path), "config.json")
+
+        if config_path and os.path.isfile(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                layers = config.get("num_hidden_layers", config.get("num_layers", 0))
+                if layers > 0:
+                    logger.info(f"从 config.json 读取到模型层数: {layers}")
+                    return layers
+            except Exception:
+                pass
+
+        # 按文件大小估算（常见模型每层 ~300-500MB）
+        # 7B 模型约 32-40 层，0.5B 约 12-16 层
+        try:
+            size_mb = os.path.getsize(model_path) / (1024 * 1024) if os.path.isfile(model_path) else 0
+            if size_mb > 0:
+                estimated = max(12, min(100, int(size_mb / 150)))
+                logger.info(f"按模型大小估算层数: {estimated} ({size_mb:.0f}MB)")
+                return estimated
+        except OSError:
+            pass
+
+        logger.info("无法确定模型层数，使用默认值 32")
+        return 32
 
     def generate(self, request: InferenceRequest) -> InferenceResult:
         """使用 llama-cpp 执行单次推理"""
@@ -809,6 +847,20 @@ class SGLangBackend(InferenceBackend):
         # 信任远程代码
         self.trust_remote_code = kwargs.get("trust_remote_code", True)
         self._runtime = None
+        self._tokenizer = None  # 延迟加载，用于精确 token 计数
+
+    def _get_tokenizer(self):
+        """延迟加载 tokenizer（用于精确的 prompt token 计数）"""
+        if self._tokenizer is None:
+            try:
+                from transformers import AutoTokenizer
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_path, trust_remote_code=self.trust_remote_code
+                )
+            except Exception:
+                logger.warning("无法加载 tokenizer，使用估算 token 数")
+                self._tokenizer = None
+        return self._tokenizer
 
     def load(self):
         """
@@ -878,8 +930,12 @@ class SGLangBackend(InferenceBackend):
         text = output["text"]
         token_ids = output.get("token_ids", [])
         completion_tokens = len(token_ids)
-        # SGLang 不直接返回 prompt token 数，通过估算
-        prompt_tokens = len(request.prompt) // 4  # 粗略估算：4 字符 ≈ 1 token
+        # 优先使用 tokenizer 精确计算 prompt token 数
+        tokenizer = self._get_tokenizer()
+        if tokenizer is not None:
+            prompt_tokens = len(tokenizer.encode(request.prompt))
+        else:
+            prompt_tokens = len(request.prompt) // 4  # 粗略估算
         tps = (completion_tokens / (elapsed_ms / 1000)) if elapsed_ms > 0 else 0
 
         self.monitor.record_request(
@@ -929,7 +985,16 @@ class SGLangBackend(InferenceBackend):
             text = output["text"]
             token_ids = output.get("token_ids", [])
             completion_tokens = len(token_ids)
-            prompt_tokens = len(requests[i].prompt) // 4 if i < len(requests) else 0
+            # 优先使用 tokenizer 精确计算 prompt token 数
+            if i < len(requests):
+                req = requests[i]
+                tokenizer = self._get_tokenizer()
+                if tokenizer is not None:
+                    prompt_tokens = len(tokenizer.encode(req.prompt))
+                else:
+                    prompt_tokens = len(req.prompt) // 4
+            else:
+                prompt_tokens = 0
             total_prompt_tokens += prompt_tokens
             total_completion_tokens += completion_tokens
 
@@ -1246,6 +1311,34 @@ def run_benchmark(engine: UnifiedInferenceEngine, num_warmup: int = 2, num_runs:
               f"({vram_used / vram_total * 100:.1f}%)")
 
 
+def _build_chat_template_func(model_path: str):
+    """尝试加载模型 tokenizer 的对话模板，失败时返回通用 fallback。
+
+    优先级：
+    1. tokenizer.apply_chat_template (支持 chat_template 的模型)
+    2. 通用模板: "User: ...\nAssistant: ..."
+    """
+    try:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True
+        )
+        if hasattr(tokenizer, 'apply_chat_template') and tokenizer.chat_template is not None:
+            logger.info("使用模型自带的 chat_template")
+            def _template(msg: str) -> str:
+                messages = [{"role": "user", "content": msg}]
+                return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            return _template
+    except Exception:
+        logger.warning("无法加载 tokenizer chat_template，使用通用模板")
+
+    # Fallback: 通用格式
+    logger.info("使用通用对话模板 (User/Assistant 格式)")
+    def _fallback(msg: str) -> str:
+        return f"User: {msg}\nAssistant: "
+    return _fallback
+
+
 def run_chat(engine: UnifiedInferenceEngine):
     """
     命令行交互模式。
@@ -1256,6 +1349,9 @@ def run_chat(engine: UnifiedInferenceEngine):
     print(f"\n=== 交互模式 (后端: {engine.backend_name}) ===")
     print("输入 'quit' 或 'exit' 退出\n")
 
+    # 尝试加载 tokenizer 以使用模型自带的对话模板
+    chat_template_fn = _build_chat_template_func(engine.model_path)
+
     while True:
         try:
             user_input = input("用户: ").strip()
@@ -1264,8 +1360,8 @@ def run_chat(engine: UnifiedInferenceEngine):
             if not user_input:
                 continue
 
-            # 构造 chat template（Qwen 格式）
-            prompt = f"<|im_start|>user\n{user_input}<|im_end|>\n<|im_start|>assistant\n"
+            # 使用模型的对话模板构建 prompt
+            prompt = chat_template_fn(user_input)
 
             start = time.time()
             result = engine.generate(prompt, max_tokens=512)

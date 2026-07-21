@@ -9,6 +9,20 @@ from typing import Dict, Any, Optional, List
 logger = logging.getLogger(__name__)
 
 
+class _ConfigError(Exception):
+    """Pipeline 配置验证错误"""
+    pass
+
+
+def _require_field(data: Dict[str, Any], key: str, section: str) -> Any:
+    """从字典中获取必填字段，缺失时抛出明确错误"""
+    if key not in data:
+        raise _ConfigError(
+            f"配置文件 [{section}] 缺少必填字段 '{key}'"
+        )
+    return data[key]
+
+
 @dataclass
 class TrainConfig:
     """Training configuration"""
@@ -84,17 +98,27 @@ class PipelineConfig:
     @classmethod
     def from_yaml(cls, yaml_path: str) -> 'PipelineConfig':
         """Load configuration from YAML file"""
+        if not os.path.exists(yaml_path):
+            raise _ConfigError(f"配置文件不存在: {yaml_path}")
+
         with open(yaml_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
-        
+
+        if data is None:
+            raise _ConfigError(f"配置文件为空: {yaml_path}")
+        if not isinstance(data, dict):
+            raise _ConfigError(
+                f"配置文件顶层必须是字典，当前类型: {type(data).__name__}"
+            )
+
         config = cls()
-        
+
         # Parse train config
         if 'train' in data and data['train']:
             train_data = data['train']
             config.train = TrainConfig(
-                model=train_data['model'],
-                dataset=train_data['dataset'],
+                model=_require_field(train_data, 'model', 'train'),
+                dataset=_require_field(train_data, 'dataset', 'train'),
                 output=train_data.get('output', './output'),
                 method=train_data.get('method', 'qlora'),
                 format=train_data.get('format', 'alpaca'),
@@ -107,33 +131,33 @@ class PipelineConfig:
                 lr=train_data.get('lr', 2e-4),
                 no_unsloth=train_data.get('no_unsloth', False)
             )
-        
+
         # Parse merge config
         if 'merge' in data and data['merge']:
             merge_data = data['merge']
             config.merge = MergeConfig(
-                base_model=merge_data['base_model'],
-                adapter=merge_data['adapter'],
-                output=merge_data['output'],
+                base_model=_require_field(merge_data, 'base_model', 'merge'),
+                adapter=_require_field(merge_data, 'adapter', 'merge'),
+                output=_require_field(merge_data, 'output', 'merge'),
                 after_train=merge_data.get('after_train', False)
             )
-        
+
         # Parse upload config
         if 'upload' in data and data['upload']:
             upload_data = data['upload']
             config.upload = UploadConfig(
-                model=upload_data['model'],
-                repo_id=upload_data['repo_id'],
+                model=_require_field(upload_data, 'model', 'upload'),
+                repo_id=_require_field(upload_data, 'repo_id', 'upload'),
                 private=upload_data.get('private', False),
                 after_merge=upload_data.get('after_merge', False)
             )
-        
+
         # Parse evaluate config
         if 'evaluate' in data and data['evaluate']:
             eval_data = data['evaluate']
             config.evaluate = EvaluateConfig(
-                model=eval_data['model'],
-                dataset=eval_data['dataset'],
+                model=_require_field(eval_data, 'model', 'evaluate'),
+                dataset=_require_field(eval_data, 'dataset', 'evaluate'),
                 metrics=eval_data.get('metrics', ['bleu', 'rouge']),
                 task=eval_data.get('task', 'text_generation'),
                 output=eval_data.get('output'),
@@ -144,12 +168,12 @@ class PipelineConfig:
                 batch_size=eval_data.get('batch_size', 1),
                 load_in_4bit=eval_data.get('load_in_4bit', False)
             )
-        
+
         # Parse deploy config
         if 'deploy' in data and data['deploy']:
             deploy_data = data['deploy']
             config.deploy = DeployConfig(
-                model=deploy_data['model'],
+                model=_require_field(deploy_data, 'model', 'deploy'),
                 model_size=deploy_data.get('model_size', 7.0),
                 use_case=deploy_data.get('use_case', 'general'),
                 host=deploy_data.get('host', '0.0.0.0'),

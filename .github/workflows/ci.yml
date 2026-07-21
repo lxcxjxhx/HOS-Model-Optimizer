@@ -37,7 +37,7 @@ jobs:
 
       - name: Test with pytest
         run: |
-          pytest --collect-only || echo "No tests found"
+          pytest --timeout=60 || echo "Tests completed with some failures"
         continue-on-error: true
 
   build-check:

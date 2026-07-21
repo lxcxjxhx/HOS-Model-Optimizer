@@ -164,7 +164,8 @@ def is_model_path(path: str) -> bool:
     if os.path.exists(path):
         return True
     # HF Hub ID 格式检查（如 "Qwen/Qwen2.5-0.5B"）
-    if "/" in path and not os.path.sep in path.replace("/", os.path.sep):
+    # 确保路径包含 / 且不含平台原生路径分隔符
+    if "/" in path and "\\" not in path:
         parts = path.split("/")
         if len(parts) == 2 and all(parts):
             return True
@@ -185,9 +186,10 @@ def get_model_format(path: str) -> str:
         return "gguf"
     if os.path.isdir(path):
         files = find_model_files(path)
-        for f in files:
-            if f.endswith(".safetensors"):
-                return "safetensors"
-            if f.endswith((".bin", ".pt")):
-                return "pytorch"
+        has_safetensors = any(f.endswith(".safetensors") for f in files)
+        has_pytorch = any(f.endswith((".bin", ".pt")) for f in files)
+        if has_safetensors:
+            return "safetensors"
+        if has_pytorch:
+            return "pytorch"
     return "unknown"

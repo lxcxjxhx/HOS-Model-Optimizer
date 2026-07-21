@@ -315,16 +315,16 @@ class TestResolveModelPath:
 
     def test_resolve_model_path_absolute(self):
         """测试绝对路径解析"""
-        abs_path = "/absolute/path/to/model"
+        abs_path = os.path.abspath("/absolute/path/to/model")
         result = resolve_model_path(abs_path)
-        
+
         assert result == abs_path
 
     def test_resolve_model_path_relative(self):
         """测试相对路径解析"""
         rel_path = "./relative/path"
         result = resolve_model_path(rel_path)
-        
+
         assert os.path.isabs(result)
         assert "relative" in result
         assert "path" in result
@@ -333,23 +333,29 @@ class TestResolveModelPath:
         """测试家目录展开"""
         home_path = "~/models/test"
         result = resolve_model_path(home_path)
-        
+
         assert "~" not in result
         assert os.path.isabs(result)
 
     def test_resolve_model_path_env_var(self):
         """测试环境变量展开"""
-        # 设置测试环境变量
-        os.environ["TEST_MODEL_DIR"] = "/test/dir"
-        env_path = "$TEST_MODEL_DIR/model"
-        
+        # Windows 使用 %VAR% 语法，Unix 使用 $VAR
+        if os.name == "nt":
+            os.environ["TEST_MODEL_DIR_WIN"] = "C:\\test\\dir"
+            env_path = "%TEST_MODEL_DIR_WIN%/model"
+            expected_segment = "C:\\test\\dir"
+        else:
+            os.environ["TEST_MODEL_DIR"] = "/test/dir"
+            env_path = "$TEST_MODEL_DIR/model"
+            expected_segment = "/test/dir"
+
         result = resolve_model_path(env_path)
-        
-        assert "$TEST_MODEL_DIR" not in result
-        assert "/test/dir" in result
-        
+
+        assert expected_segment in result
+
         # 清理环境变量
-        del os.environ["TEST_MODEL_DIR"]
+        for key in ["TEST_MODEL_DIR", "TEST_MODEL_DIR_WIN"]:
+            os.environ.pop(key, None)
 
 
 class TestIsModelPath:

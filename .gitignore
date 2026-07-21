@@ -77,3 +77,6 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Compiled cache (e.g. unsloth JIT cache)
+unsloth_compiled_cache/

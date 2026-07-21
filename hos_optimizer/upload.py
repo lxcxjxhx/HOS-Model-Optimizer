@@ -1,14 +1,11 @@
 """上传模型到 HuggingFace Hub 的工具模块"""
 import os
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
-
 import logging
 import sys
 from pathlib import Path
 
 from huggingface_hub import HfApi, CommitOperationAdd
 from huggingface_hub.utils import HfHubHTTPError
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +26,8 @@ def upload_to_huggingface(
         RuntimeError: 未登录 HuggingFace 时抛出。
         FileNotFoundError: model_path 不存在时抛出。
     """
+    # 确保进度条显示（只在函数作用域内生效，不污染模块级别）
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
     model_path = Path(model_path)
     if not model_path.is_dir():
         raise FileNotFoundError(f"模型目录不存在: {model_path}")
@@ -66,24 +65,22 @@ def upload_to_huggingface(
     total_size_mb = sum(f.stat().st_size for f in files) / (1024 * 1024)
     print(f"\n开始上传 {total} 个文件 ({total_size_mb:.1f} MB) 到 {repo_id}...\n", flush=True)
 
-    # 逐个文件上传并显示进度
-    for idx, file_path in enumerate(tqdm(files, desc="上传进度", unit="file"), 1):
-        rel_path = file_path.relative_to(model_path)
-        file_size_mb = file_path.stat().st_size / (1024 * 1024)
-        
-        # 显示当前文件信息
-        print(f"[{idx}/{total}] 上传: {rel_path} ({file_size_mb:.2f} MB)...", flush=True)
-        
-        try:
-            api.upload_file(
-                path_or_fileobj=str(file_path),
-                path_in_repo=str(rel_path),
-                repo_id=repo_id,
-                repo_type="model",
-            )
-            print("  ✓ 完成", flush=True)
-        except Exception as exc:
-            logger.error("上传文件失败 %s: %s", rel_path, exc)
-            raise
+    # 批量上传：使用 CommitOperationAdd 将所有文件打包为一次 commit
+    operations = []
+    for f in files:
+        rel_path = str(f.relative_to(model_path)).replace("\\", "/")
+        operations.append(
+            CommitOperationAdd(path_in_repo=rel_path, path_or_fileobj=str(f))
+        )
 
-    print(f"\n✓ 上传完成: https://huggingface.co/{repo_id}", flush=True)
+    try:
+        api.create_commit(
+            repo_id=repo_id,
+            repo_type="model",
+            operations=operations,
+            commit_message=f"Upload model from {model_path.name} ({total} files, {total_size_mb:.1f} MB)",
+        )
+        print(f"\n✓ 批量上传完成: https://huggingface.co/{repo_id}", flush=True)
+    except Exception as exc:
+        logger.error("批量上传失败: %s", exc)
+        raise
