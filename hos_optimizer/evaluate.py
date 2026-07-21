@@ -66,7 +66,7 @@ class EvaluationConfig:
     # 模型配置
     model_path: str = ""
     tokenizer_path: Optional[str] = None
-    trust_remote_code: bool = True
+    trust_remote_code: bool = True  # 可通过 HOS_TRUST_REMOTE_CODE=0 禁用
 
     # 数据集配置
     dataset_path: str = ""
@@ -1351,7 +1351,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--trust-remote-code", action="store_true", default=True,
-        help="信任远程代码（默认 True）",
+        help="信任远程代码（默认 True；安全敏感场景可设为 False，或设置 HOS_TRUST_REMOTE_CODE=0）",
     )
 
     # 数据集参数

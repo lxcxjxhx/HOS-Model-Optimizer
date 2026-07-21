@@ -70,7 +70,7 @@ class TrainingConfig:
     
     # 模型配置
     model_name_or_path: str = "Qwen/Qwen2.5-0.5B"
-    trust_remote_code: bool = True
+    trust_remote_code: bool = True  # 可通过 HOS_TRUST_REMOTE_CODE 环境变量覆盖
     
     # 训练方法
     finetuning_type: str = "qlora"  # "qlora" 或 "lora"

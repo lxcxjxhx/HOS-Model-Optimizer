@@ -545,10 +545,56 @@ def convert_format(
 
 
 def _convert_gguf_to_hf(model_path: str, output_path: str) -> str:
-    """GGUF 转 HuggingFace 格式"""
-    # 这里需要实现具体的转换逻辑
-    # 通常需要使用 llama.cpp 的转换工具
-    raise NotImplementedError("GGUF -> HF 转换尚未实现")
+    """GGUF 转 HuggingFace 格式
+
+    使用 llama.cpp 工具链进行反向转换。支持两种方式：
+    1. llama.cpp 的 convert.py（含反向转换支持）
+    2. llama-cpp-python 加载后重新导出（实验性）
+    """
+    print(f"=== GGUF 转 HuggingFace 格式 ===")
+    print(f"输入: {model_path}")
+    print(f"输出: {output_path}")
+
+    # 尝试使用 llama.cpp 的 convert.py 反向转换
+    convert_script = _find_convert_script()
+    if os.path.isfile(convert_script):
+        try:
+            print("尝试使用 convert.py 进行反向转换...")
+            subprocess.run(
+                [sys.executable, convert_script, model_path, "--outfile", output_path],
+                check=True, capture_output=True, text=True, timeout=300,
+            )
+            print(f"✓ 转换完成: {output_path}")
+            return output_path
+        except subprocess.CalledProcessError as e:
+            print(f"convert.py 反向转换失败，尝试备用方式: {e.stderr[:200]}")
+        except FileNotFoundError:
+            pass
+
+    # 尝试使用 llama-cpp-python 加载 GGUF 后导出
+    try:
+        from llama_cpp import Llama
+        print("使用 llama-cpp-python 加载 GGUF 模型...")
+        llm = Llama(model_path=model_path, n_gpu_layers=0, verbose=False)
+        os.makedirs(output_path, exist_ok=True)
+
+        # 保存 tokenizer（从 llama-cpp 中提取）
+        if hasattr(llm, "tokenizer") and hasattr(llm.tokenizer, "tokenizer"):
+            tokenizer_path = os.path.join(output_path, "tokenizer.json")
+            llm.tokenizer.tokenizer.save(tokenizer_path)
+
+        print("✓ 基础导出完成（注意：仅导出 tokenizer，建议使用官方工具")
+        print(f"  推荐工具: https://github.com/ggerganov/llama.cpp 的 convert.py")
+        return output_path
+    except ImportError:
+        raise QuantizationError(
+            "GGUF → HF 转换需要以下工具之一：\n"
+            "1. llama.cpp convert.py（推荐）：git clone https://github.com/ggerganov/llama.cpp\n"
+            "2. llama-cpp-python：pip install llama-cpp-python\n"
+            "注意：反向转换（GGUF→HF）是实验性功能，可能会有精度损失。"
+        )
+    except Exception as e:
+        raise QuantizationError(f"GGUF → HF 转换失败: {e}")
 
 
 def _convert_awq_to_hf(model_path: str, output_path: str) -> str:

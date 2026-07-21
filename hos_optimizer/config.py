@@ -738,7 +738,12 @@ class ConfigManager:
                     )
 
             elif condition == "value_gt":
-                for key in rule["keys"]:
+                for key_item in rule["keys"]:
+                    # keys 中的条目可能是 ("key",) 元组或纯字符串
+                    if isinstance(key_item, tuple):
+                        key = key_item[0]
+                    else:
+                        key = key_item
                     val = self._get_nested(config, key)
                     threshold = rule.get("threshold", 1)
                     if val is not None and val > threshold:
@@ -749,15 +754,17 @@ class ConfigManager:
             elif condition == "backend_mismatch":
                 backend = self._get_nested(config, "backend")
                 expected = rule.get("expected_backend", "")
-                # 检查第二个 key 是否存在且为 True / 非默认值
-                if len(rule["keys"]) > 1:
-                    feature_key = rule["keys"][1]
-                    feature_val = self._get_nested(config, feature_key)
-                    if backend is not None and backend != expected and feature_val:
-                        issues.append(
-                            f"[冲突] {rule['description']}: "
-                            f"backend={backend} 不支持 {feature_key}={feature_val}"
-                        )
+                # 检查 feature key 是否存在且有效
+                if rule["keys"]:
+                    key_pair = rule["keys"][0]
+                    if len(key_pair) >= 2:
+                        feature_key = key_pair[1]
+                        feature_val = self._get_nested(config, feature_key)
+                        if backend is not None and backend != expected and feature_val:
+                            issues.append(
+                                f"[冲突] {rule['description']}: "
+                                f"backend={backend} 不支持 {feature_key}={feature_val}"
+                            )
 
         return issues
 

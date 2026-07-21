@@ -436,7 +436,7 @@ class TestFormatConversion:
                 to_format="hf"
             )
         
-        assert "尚未实现" in str(exc_info.value)
+        assert "GGUF" in str(exc_info.value) and "转换" in str(exc_info.value)
 
 
 class TestModelSize:
