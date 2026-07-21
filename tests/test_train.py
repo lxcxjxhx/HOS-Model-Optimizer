@@ -21,6 +21,9 @@ import json
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Mock unsloth before importing train module
+sys.modules['unsloth'] = MagicMock()
+
 from hos_optimizer.train import (
     TrainingConfig,
     DatasetProcessor,
@@ -314,18 +317,22 @@ class TestLoadModelAndTokenizer:
             finetuning_type="qlora"
         )
         
+        mock_model = MagicMock()
+        mock_tokenizer = MagicMock()
+        
+        # 代码在函数内部做 `from unsloth import FastLanguageModel`，
+        # 所以需要让 sys.modules['unsloth'] 的 FastLanguageModel 返回正确的 mock
+        mock_unsloth = MagicMock()
+        mock_unsloth.FastLanguageModel.from_pretrained.return_value = (mock_model, mock_tokenizer)
+        
         with patch("hos_optimizer.train.UNSLOTH_AVAILABLE", True), \
-             patch("hos_optimizer.train.FastLanguageModel") as mock_fast:
-            
-            mock_model = MagicMock()
-            mock_tokenizer = MagicMock()
-            mock_fast.from_pretrained.return_value = (mock_model, mock_tokenizer)
+             patch.dict("sys.modules", {"unsloth": mock_unsloth}):
             
             model, tokenizer = load_model_and_tokenizer(config)
             
             assert model is not None
             assert tokenizer is not None
-            mock_fast.from_pretrained.assert_called_once()
+            mock_unsloth.FastLanguageModel.from_pretrained.assert_called_once()
 
     def test_load_model_with_quantization(self):
         """测试带量化的模型加载"""
@@ -378,9 +385,9 @@ class TestLoraConfig:
             
             assert result is not None
             mock_lora.assert_called_once()
-            # 验证 target_modules 为 None（表示所有模块）
+            # 验证 target_modules 为显式指定的模块列表
             call_kwargs = mock_lora.call_args[1]
-            assert call_kwargs["target_modules"] is None
+            assert call_kwargs["target_modules"] == ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
     def test_get_lora_config_specific_modules(self):
         """测试特定模块的 LoRA 配置"""

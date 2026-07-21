@@ -15,12 +15,18 @@
 import os
 import sys
 import pytest
+import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 import time
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# 检查可选依赖是否可用
+LLAMA_CPP_AVAILABLE = importlib.util.find_spec("llama_cpp") is not None
+VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
+SGLANG_AVAILABLE = importlib.util.find_spec("sglang") is not None
 
 from hos_optimizer.inference import (
     InferenceRequest,
@@ -299,12 +305,17 @@ class TestLlamaCppBackend:
         assert backend.n_threads == 4
         assert backend._loaded is False
 
+    @pytest.mark.skipif(
+        not LLAMA_CPP_AVAILABLE,
+        reason="llama_cpp not installed"
+    )
     def test_llama_cpp_load_success(self):
         """测试 llama-cpp 模型加载成功"""
-        with patch("llama_cpp.Llama") as mock_llama:
-            mock_model = MagicMock()
-            mock_llama.return_value = mock_model
-            
+        mock_llama = MagicMock()
+        mock_model = MagicMock()
+        mock_llama.return_value = mock_model
+        
+        with patch.dict("sys.modules", {"llama_cpp": MagicMock(Llama=mock_llama)}):
             backend = LlamaCppBackend("/path/to/model.gguf")
             
             with patch("hos_optimizer.inference.get_total_gpu_memory_mb", return_value=8192):
@@ -385,10 +396,11 @@ class TestVLLMBackend:
 
     def test_vllm_load_success(self):
         """测试 vLLM 模型加载成功"""
-        with patch("vllm.LLM") as mock_llm:
-            mock_engine = MagicMock()
-            mock_llm.return_value = mock_engine
-            
+        mock_llm = MagicMock()
+        mock_engine = MagicMock()
+        mock_llm.return_value = mock_engine
+        
+        with patch.dict("sys.modules", {"vllm": MagicMock(LLM=mock_llm)}):
             backend = VLLMBackend("/path/to/model")
             backend.load()
             
@@ -429,7 +441,7 @@ class TestVLLMBackend:
         
         request = InferenceRequest(prompt="测试", max_tokens=50)
         
-        with patch("vllm.SamplingParams"):
+        with patch.dict("sys.modules", {"vllm": MagicMock()}):
             result = backend.generate(request)
         
         assert isinstance(result, InferenceResult)
@@ -461,7 +473,7 @@ class TestVLLMBackend:
             InferenceRequest(prompt="提示2")
         ]
         
-        with patch("vllm.SamplingParams"):
+        with patch.dict("sys.modules", {"vllm": MagicMock()}):
             results = backend.generate_batch(requests)
         
         assert len(results) == 2
@@ -502,10 +514,11 @@ class TestSGLangBackend:
 
     def test_sglang_load_success(self):
         """测试 SGLang 模型加载成功"""
-        with patch("sglang.Runtime") as mock_runtime:
-            mock_rt = MagicMock()
-            mock_runtime.return_value = mock_rt
-            
+        mock_runtime = MagicMock()
+        mock_rt = MagicMock()
+        mock_runtime.return_value = mock_rt
+        
+        with patch.dict("sys.modules", {"sglang": MagicMock(Runtime=mock_runtime)}):
             backend = SGLangBackend("/path/to/model")
             backend.load()
             
@@ -630,12 +643,11 @@ class TestUnifiedInferenceEngine:
 
     def test_unified_engine_generate(self):
         """测试统一引擎生成"""
-        with patch("hos_optimizer.inference.VLLMBackend") as mock_backend_cls:
-            mock_backend = MagicMock()
-            mock_result = InferenceResult(text="结果", prompt_tokens=10, completion_tokens=20)
-            mock_backend.generate.return_value = mock_result
-            mock_backend_cls.return_value = mock_backend
-            
+        mock_backend = MagicMock()
+        mock_result = InferenceResult(text="结果", prompt_tokens=10, completion_tokens=20)
+        mock_backend.generate.return_value = mock_result
+        
+        with patch.object(UnifiedInferenceEngine, 'BACKEND_REGISTRY', {"vllm": lambda *a, **kw: mock_backend}):
             engine = UnifiedInferenceEngine(
                 model_path="/path/to/model",
                 backend="vllm",
@@ -649,15 +661,14 @@ class TestUnifiedInferenceEngine:
 
     def test_unified_engine_generate_batch(self):
         """测试统一引擎批量生成"""
-        with patch("hos_optimizer.inference.VLLMBackend") as mock_backend_cls:
-            mock_backend = MagicMock()
-            mock_results = [
-                InferenceResult(text="结果1", prompt_tokens=10, completion_tokens=20),
-                InferenceResult(text="结果2", prompt_tokens=15, completion_tokens=25)
-            ]
-            mock_backend.generate_batch.return_value = mock_results
-            mock_backend_cls.return_value = mock_backend
-            
+        mock_backend = MagicMock()
+        mock_results = [
+            InferenceResult(text="结果1", prompt_tokens=10, completion_tokens=20),
+            InferenceResult(text="结果2", prompt_tokens=15, completion_tokens=25)
+        ]
+        mock_backend.generate_batch.return_value = mock_results
+        
+        with patch.object(UnifiedInferenceEngine, 'BACKEND_REGISTRY', {"vllm": lambda *a, **kw: mock_backend}):
             engine = UnifiedInferenceEngine(
                 model_path="/path/to/model",
                 backend="vllm",
@@ -671,12 +682,11 @@ class TestUnifiedInferenceEngine:
 
     def test_unified_engine_get_stats(self):
         """测试统一引擎获取性能统计"""
-        with patch("hos_optimizer.inference.VLLMBackend") as mock_backend_cls:
-            mock_backend = MagicMock()
-            mock_stats = PerformanceStats(total_requests=5)
-            mock_backend.get_performance_stats.return_value = mock_stats
-            mock_backend_cls.return_value = mock_backend
-            
+        mock_backend = MagicMock()
+        mock_stats = PerformanceStats(total_requests=5)
+        mock_backend.get_performance_stats.return_value = mock_stats
+        
+        with patch.object(UnifiedInferenceEngine, 'BACKEND_REGISTRY', {"vllm": lambda *a, **kw: mock_backend}):
             engine = UnifiedInferenceEngine(
                 model_path="/path/to/model",
                 backend="vllm",
@@ -689,10 +699,9 @@ class TestUnifiedInferenceEngine:
 
     def test_unified_engine_shutdown(self):
         """测试统一引擎关闭"""
-        with patch("hos_optimizer.inference.VLLMBackend") as mock_backend_cls:
-            mock_backend = MagicMock()
-            mock_backend_cls.return_value = mock_backend
-            
+        mock_backend = MagicMock()
+        
+        with patch.object(UnifiedInferenceEngine, 'BACKEND_REGISTRY', {"vllm": lambda *a, **kw: mock_backend}):
             engine = UnifiedInferenceEngine(
                 model_path="/path/to/model",
                 backend="vllm",

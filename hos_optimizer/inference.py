@@ -40,6 +40,38 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# 模块级可选依赖导入（用于测试 patch）
+# ============================================================
+
+try:
+    from llama_cpp import Llama as _LlamaCls
+except ImportError:
+    _LlamaCls = None
+
+try:
+    from vllm import LLM as _VLLMCls
+    from vllm import SamplingParams as _VLLMSamplingParams
+except ImportError:
+    _VLLMCls = None
+    _VLLMSamplingParams = None
+
+try:
+    from sglang import Runtime as _SGLangRuntime
+except ImportError:
+    _SGLangRuntime = None
+
+
+def _check_import(module_name: str) -> bool:
+    """检查可选模块是否可用"""
+    mapping = {
+        "llama_cpp": _LlamaCls,
+        "vllm": _VLLMCls,
+        "sglang": _SGLangRuntime,
+    }
+    return mapping.get(module_name) is not None
+
+
+# ============================================================
 # 数据结构定义
 # ============================================================
 

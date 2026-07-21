@@ -63,6 +63,11 @@ class TestSetupLogger:
         assert logger is not None
         # 应该有两个 handler：控制台和文件
         assert len(logger.handlers) >= 1
+        
+        # 关闭文件处理器，避免 Windows 文件锁问题
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
 
     def test_setup_logger_no_duplicate_handlers(self):
         """测试避免重复添加 handler"""

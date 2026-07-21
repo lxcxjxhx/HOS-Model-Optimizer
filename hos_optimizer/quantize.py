@@ -38,6 +38,31 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 import torch
 import time
+import numpy as np
+from dataclasses import dataclass, field
+
+# 模块级导入（用于测试 patch）
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+except ImportError:
+    AutoModelForCausalLM = None
+    AutoTokenizer = None
+
+try:
+    from awq import AutoAWQForCausalLM
+except ImportError:
+    AutoAWQForCausalLM = None
+
+try:
+    from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
+except ImportError:
+    AutoGPTQForCausalLM = None
+    BaseQuantizeConfig = None
+
+try:
+    from datasets import load_dataset
+except ImportError:
+    load_dataset = None
 
 
 # 8GB VRAM 优化配置
@@ -425,37 +450,32 @@ def evaluate_perplexity(
     print(f"模型: {model_path}")
     print(f"数据集: {dataset}")
     
-    try:
-        # 导入评测模块
-        from hos_optimizer.evaluate import EvaluationEngine, EvaluationConfig, MetricLoader
-        
-        # 创建评测配置
-        config = EvaluationConfig(
-            model_path=model_path,
-            dataset_path="",  # PPL 计算不需要数据集文件
-            metrics=["ppl"],
-            task_type="perplexity",
-            max_samples=max_samples,
-            batch_size=1,
-            device_map="auto",
+    if load_dataset is None:
+        raise QuantizationError(
+            "缺少依赖: datasets\n"
+            "请安装: pip install datasets"
         )
-        
-        # 创建评测引擎
-        engine = EvaluationEngine(config)
-        
-        # 加载模型
+    
+    try:
+        # 加载模型和分词器
         print("加载模型...")
-        engine.load_model()
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+        )
         
         # 加载评估数据集
         print(f"加载评估数据: {dataset}...")
-        from datasets import load_dataset
-        
         test_data = load_dataset(dataset, "wikitext-2-raw-v1", split="test")
         
-        # 使用参考文本计算 PPL
+        # 收集有效参考文本
         references = []
-        for i, text in enumerate(test_data["text"]):
+        for text in test_data["text"]:
             if text and text.strip():
                 references.append(text)
             if len(references) >= max_samples:
@@ -464,32 +484,56 @@ def evaluate_perplexity(
         if not references:
             raise QuantizationError("数据集中没有有效的文本样本")
         
-        # 计算 PPL（困惑度）
-        # 注意：PPL 评估模型在参考文本上的交叉熵，不涉及预测文本比较
+        # 编码并计算 PPL
         print("计算 PPL...")
-        from hos_optimizer.evaluate import MetricLoader
-        ppl_metric = MetricLoader()
-        ppl_value = ppl_metric.compute(
-            metric_name="ppl",
-            predictions=references,   # _compute_perplexity 内部使用 references 作为评估语料
-            references=references,
-            model=engine._model,
-            tokenizer=engine._tokenizer,
-        )
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        model.eval()
+        
+        encodings = tokenizer("\n\n".join(references), return_tensors="pt")
+        encodings = {k: v.to(device) for k, v in encodings.items()}
+        
+        total_nll = 0.0
+        total_tokens = 0
+        
+        input_ids = encodings["input_ids"]
+        seq_len = input_ids.size(1)
+        
+        for begin in range(0, seq_len, stride):
+            end = min(begin + seq_len, seq_len)
+            chunk = input_ids[:, begin:end]
+            
+            with torch.no_grad():
+                outputs = model(chunk, labels=chunk)
+            
+            nll = outputs.loss.item()
+            n_tokens = chunk.size(1)
+            total_nll += nll * n_tokens
+            total_tokens += n_tokens
+            
+            if end >= seq_len:
+                break
+        
+        ppl = float(np.exp(total_nll / total_tokens))
         
         # 释放资源
-        engine.shutdown()
+        del model, tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
-        print(f"✓ PPL 评估完成: {ppl_value:.2f}")
-        return ppl_value
+        print(f"✓ PPL 评估完成: {ppl:.2f}")
+        return ppl
         
     except ImportError as e:
         raise QuantizationError(
-            f"缺少依赖: {e.name}\n"
-            f"请安装: pip install datasets evaluate"
+            f"缺少依赖: {e}\n"
+            "请安装: pip install datasets"
         )
+    except QuantizationError:
+        raise
     except Exception as e:
         raise QuantizationError(f"PPL 评估失败: {str(e)}")
+
 
 
 def convert_format(

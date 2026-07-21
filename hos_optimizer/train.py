@@ -42,23 +42,25 @@ from peft import (
 )
 from datasets import load_dataset, Dataset, DatasetDict
 
-# 尝试导入 Unsloth（可选加速，延迟到实际使用时才导入）
-# 注意：unsloth 在无 GPU 环境下会抛出 NotImplementedError
-_UNSLOTH_AVAILABLE = None  # None = 未检查, True/False = 已检查
+# 尝试导入 Unsloth（可选加速）
+# 延迟导入以避免在无 GPU 环境中的导入错误
+UNSLOTH_AVAILABLE = False
+FastLanguageModel = None
 
-
-def _is_unsloth_available() -> bool:
-    """延迟检查 unsloth 是否可用（避免无 GPU 时模块级导入失败）"""
-    global _UNSLOTH_AVAILABLE
-    if _UNSLOTH_AVAILABLE is None:
-        try:
-            import unsloth  # noqa: F401
-            _UNSLOTH_AVAILABLE = True
-            logger.debug("Unsloth 可用，训练将获得加速")
-        except (ImportError, NotImplementedError):
-            _UNSLOTH_AVAILABLE = False
-            logger.info("Unsloth 不可用，将使用标准训练流程。安装命令: pip install unsloth")
-    return _UNSLOTH_AVAILABLE
+def _try_import_unsloth():
+    """尝试导入 Unsloth，仅在需要时调用"""
+    global UNSLOTH_AVAILABLE, FastLanguageModel
+    if UNSLOTH_AVAILABLE or FastLanguageModel is not None:
+        return UNSLOTH_AVAILABLE
+    try:
+        from unsloth import FastLanguageModel as _FLM
+        FastLanguageModel = _FLM
+        UNSLOTH_AVAILABLE = True
+        return True
+    except (ImportError, NotImplementedError) as e:
+        UNSLOTH_AVAILABLE = False
+        logging.warning(f"Unsloth 不可用: {e}。将使用标准训练流程。")
+        return False
 
 
 logger = logging.getLogger(__name__)
@@ -371,7 +373,7 @@ def load_model_and_tokenizer(
     logger.info(f"加载模型: {config.model_name_or_path}")
 
     # 检查是否使用 Unsloth
-    if config.use_unsloth and _is_unsloth_available() and config.finetuning_type == "qlora":
+    if config.use_unsloth and UNSLOTH_AVAILABLE and config.finetuning_type == "qlora":
         logger.info("使用 Unsloth 加速加载模型")
         from unsloth import FastLanguageModel
         model, tokenizer = FastLanguageModel.from_pretrained(

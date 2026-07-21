@@ -15,12 +15,17 @@
 import os
 import sys
 import pytest
+import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 import subprocess
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# 检查可选依赖是否可用
+AWQ_AVAILABLE = importlib.util.find_spec("awq") is not None
+GPTQ_AVAILABLE = importlib.util.find_spec("auto_gptq") is not None
 
 from hos_optimizer.quantize import (
     QuantizationError,
@@ -180,6 +185,10 @@ class TestGGUFQuantization:
 class TestAWQQuantization:
     """AWQ 量化测试"""
 
+    @pytest.mark.skipif(
+        not AWQ_AVAILABLE,
+        reason="awq not installed"
+    )
     def test_quantize_awq_success(self, tmp_dir):
         """测试 AWQ 量化成功场景"""
         model_path = os.path.join(tmp_dir, "model")
@@ -226,6 +235,10 @@ class TestAWQQuantization:
             assert "缺少依赖" in str(exc_info.value)
             assert "autoawq" in str(exc_info.value)
 
+    @pytest.mark.skipif(
+        not AWQ_AVAILABLE,
+        reason="awq not installed"
+    )
     def test_quantize_awq_quantization_failed(self, tmp_dir):
         """测试 AWQ 量化过程失败的情况"""
         model_path = os.path.join(tmp_dir, "model")
@@ -253,6 +266,10 @@ class TestAWQQuantization:
 class TestGPTQQuantization:
     """GPTQ 量化测试"""
 
+    @pytest.mark.skipif(
+        not GPTQ_AVAILABLE,
+        reason="auto_gptq not installed"
+    )
     def test_quantize_gptq_success(self, tmp_dir):
         """测试 GPTQ 量化成功场景"""
         model_path = os.path.join(tmp_dir, "model")
@@ -319,7 +336,8 @@ class TestPerplexityEvaluation:
         
         with patch("hos_optimizer.quantize.AutoModelForCausalLM") as mock_model_cls, \
              patch("hos_optimizer.quantize.AutoTokenizer") as mock_tokenizer_cls, \
-             patch("hos_optimizer.quantize.load_dataset") as mock_load_dataset:
+             patch("hos_optimizer.quantize.load_dataset") as mock_load_dataset, \
+             patch("hos_optimizer.quantize.torch.cuda.is_available", return_value=False):
             
             mock_model = MagicMock()
             mock_tokenizer = MagicMock()
@@ -329,17 +347,26 @@ class TestPerplexityEvaluation:
             mock_tokenizer_cls.from_pretrained.return_value = mock_tokenizer
             mock_load_dataset.return_value = mock_dataset
             
-            # Mock 数据集
+            # Mock 数据集返回文本列表
             mock_dataset.__getitem__.return_value = ["text1", "text2"]
             
-            # Mock tokenizer 调用
-            mock_encodings = MagicMock()
-            mock_encodings.input_ids.size.return_value = (1, 100)
+            # Mock tokenizer 调用返回编码（dict-like）
+            mock_input_ids = MagicMock()
+            # size(dim) 返回 int，size() 返回 tuple
+            mock_input_ids.size.side_effect = lambda dim=None: (1, 100) if dim is None else 100
+            mock_input_ids.to.return_value = mock_input_ids
+            # 支持切片操作，返回自身
+            mock_input_ids.__getitem__.return_value = mock_input_ids
+            mock_encodings = {"input_ids": mock_input_ids}
             mock_tokenizer.return_value = mock_encodings
             
-            # Mock 模型推理
-            mock_model.return_value = MagicMock(loss=MagicMock(item=MagicMock(return_value=2.5)))
-            mock_model.device = "cpu"
+            # Mock model.to() 返回自身
+            mock_model.to.return_value = mock_model
+            
+            # Mock 模型推理返回 loss
+            mock_output = MagicMock()
+            mock_output.loss.item.return_value = 2.5
+            mock_model.return_value = mock_output
             
             result = evaluate_perplexity(
                 model_path=model_path,
