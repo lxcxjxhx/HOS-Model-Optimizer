@@ -248,7 +248,7 @@ HOS-Model-Optimizer/
 ├── pyproject.toml           # 项目配置
 ├── requirements.txt         # 依赖列表
 ├── setup.py                 # 安装脚本
-├── LICENSE                  # MIT 许可证
+├── LICENSE                  # AGPLv3 许可证
 ├── README.md                # 项目主文档（本文件）
 ├── INSTALL.md               # 安装指南
 ├── EXAMPLES.md              # 使用示例
@@ -284,26 +284,6 @@ black hos_optimizer/
 
 # 代码检查
 flake8 hos_optimizer/
-```
-
-## 许可证
-
-本项目基于 [MIT License](LICENSE) 开源。
-
-```
-MIT License
-
-Copyright (c) 2026 HOS Team
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
 ```
 
 ## 相关链接
